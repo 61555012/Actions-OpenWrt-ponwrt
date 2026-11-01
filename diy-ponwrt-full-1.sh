@@ -1,16 +1,14 @@
 #!/bin/bash
 #
-# diy-lite-part1.sh —— 纯净版: 在 feeds update 之前执行（改 feeds.conf.default）
+# diy-ponwrt-full-1.sh —— 在 feeds update 之前执行（改 feeds.conf.default）
 #
-# 纯净版只动一处 feeds:
-#   pon_userspace -> naoki66/OpenWrt_ONU_CONFIG
-#   该仓库是 pbs05/openwrt-pon-userspace 的深度 fork，把 luci-app-pon 升级为
-#   luci-app-onu，并附 luci-app-pon-status。纯净版保留它，是因为
-#   "把光口注册上去" 属于基础功能，不是可选插件；仓库里的 files-lite/etc/config/pon
-#   也是按这套 UCI 结构写的。
-#   （若想连它也去掉、只留纯上游 luci-app-pon，删掉下面这段替换即可。）
-#
-# pon_drivers 保持 pbs05 官方源（xpon MAC + 光前端 EN7572/GN28L95/UX3363）。
+# 做两件事:
+#   1) pon_userspace 换成 naoki66/OpenWrt_ONU_CONFIG
+#      该仓库是 pbs05/openwrt-pon-userspace 的深度 fork：把 luci-app-pon 升级为顶级
+#      luci-app-onu，并吸收 luci-app-iptv，新增 internet/voice 页与 luci-app-pon-status。
+#      包名与上游重叠（airoha-pond / airoha-ponctl），所以必须【替换】而非【追加】，
+#      否则 feeds install 会因同名包冲突失败。
+#   2) pon_drivers 保持 pbs05 官方源（xpon MAC + 光前端 EN7572/GN28L95/UX3363）。
 #
 set -e
 
@@ -27,7 +25,7 @@ else
 fi
 echo "当前目录: $(pwd)"
 
-echo "==== [diy-lite-p1] 替换 pon_userspace feed -> naoki66/OpenWrt_ONU_CONFIG ===="
+echo "==== [diy-part1] 替换 pon_userspace feed -> naoki66/OpenWrt_ONU_CONFIG ===="
 if grep -q '^src-git pon_userspace' feeds.conf.default; then
   sed -i "s#^src-git pon_userspace.*#src-git pon_userspace ${ONU_FEED}#" feeds.conf.default
   echo "    已替换: $(grep '^src-git pon_userspace' feeds.conf.default)"
@@ -36,7 +34,7 @@ else
   echo "    已追加: $(grep '^src-git pon_userspace' feeds.conf.default)"
 fi
 
-echo "==== [diy-lite-p1] 确保 pon_drivers feed 存在 ===="
+echo "==== [diy-part1] 确保 pon_drivers feed 存在 ===="
 if ! grep -q '^src-git pon_drivers' feeds.conf.default; then
   echo 'src-git pon_drivers https://github.com/pbs05/openwrt-pon-drivers.git' >> feeds.conf.default
   echo "    已追加 pon_drivers"
@@ -44,6 +42,6 @@ else
   echo "    已存在: $(grep '^src-git pon_drivers' feeds.conf.default)"
 fi
 
-echo "==== [diy-lite-p1] 当前 feeds ===="
+echo "==== [diy-part1] 当前 feeds ===="
 grep -vE '^\s*#|^\s*$' feeds.conf.default
-echo "==== [diy-lite-p1] 完成 ===="
+echo "==== [diy-part1] 完成 ===="

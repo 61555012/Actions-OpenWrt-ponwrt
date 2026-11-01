@@ -1,14 +1,11 @@
 #!/bin/bash
 #
-# diy-lite-part2.sh —— 纯净版(桥接版): 在 feeds update 之后、feeds install 之前执行
+# diy-lede-lite-2.sh —— 纯净版(LEDE 源码): 在 feeds update 之后、feeds install 之前执行
 #
-# 纯净版不引用仓库里的 files/ 覆盖层（不带实机 PPPoE 账号、不带个人密码、不带 UPnP 配置），
-# 所有默认值都在构建期直接写进源码树，等价于"固件出厂状态"。
-#
-# 本脚本做 6 件事（不 clone 任何第三方插件）:
+# 与 diy-ponwrt-lite-2.sh 做的事情一致，只是面向 LEDE 源码树（没有官方 an7581 基线 config，
+# 所以 LEDE 版的 .config 是最小种子，靠 make defconfig 补齐默认值）:
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
-#      （PPE 的 airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS 依赖它，否则计数恒 0）
-#   2) 断言 L2 桥接卸载前置 kmod-nf-conntrack-bridge 在默认包里
+#   2) 检查/兜底 L2 桥接卸载前置 kmod-nf-conntrack-bridge（LEDE 默认包里没有，靠 .config-lede-lite 选）
 #   3) 从 base-files / target 的 network 模板里删掉 dummy 段
 #   4) 生成首启 uci-defaults: 默认打开 flow_offloading(含硬件) + dummy 兜底清理
 #   5) 默认 root 密码设为 admin123
@@ -26,18 +23,16 @@ elif [ -f openwrt/feeds.conf.default ]; then
   cd openwrt
   echo "进入源码树: $(pwd)"
 else
-  echo "❌ 找不到 openwrt 源码树 (feeds.conf.default)"; exit 1
+  echo "❌ 找不到 openwrt/LEDE 源码树 (feeds.conf.default)"; exit 1
 fi
 
 ########################################
 # 1) 内核: 每流流量统计（硬件加速的计数来源）
 ########################################
-echo "==== [diy-lite-p2] 打开 CONFIG_NET_AIROHA_FLOW_STATS ===="
+echo "==== [diy-lede-lite-p2] 打开 CONFIG_NET_AIROHA_FLOW_STATS ===="
 KC=target/linux/airoha/an7581/config-6.18
 if [ -f "$KC" ]; then
-  # 原文件里是 "# CONFIG_NET_AIROHA_FLOW_STATS is not set"
   sed -i 's/^# CONFIG_NET_AIROHA_FLOW_STATS is not set$/CONFIG_NET_AIROHA_FLOW_STATS=y/' "$KC"
-  # 若原来没有这一行（上游改名/移动），直接追加
   grep -q '^CONFIG_NET_AIROHA_FLOW_STATS=' "$KC" || echo 'CONFIG_NET_AIROHA_FLOW_STATS=y' >> "$KC"
   if grep -q '^CONFIG_NET_AIROHA_FLOW_STATS=y' "$KC"; then
     echo "    ✅ $KC 已打开每流统计"
@@ -50,21 +45,19 @@ else
 fi
 
 ########################################
-# 2) L2 桥接卸载前置（an7581 target.mk 默认带，这里做兜底断言）
+# 2) L2 桥接卸载前置
 ########################################
-echo "==== [diy-lite-p2] 检查 kmod-nf-conntrack-bridge 是否在默认包 ===="
-if grep -q 'kmod-nf-conntrack-bridge' target/linux/airoha/an7581/target.mk; then
-  echo "    ✅ target.mk DEFAULT_PACKAGES 已含 kmod-nf-conntrack-bridge"
+echo "==== [diy-lede-lite-p2] 检查 kmod-nf-conntrack-bridge ===="
+if grep -q 'kmod-nf-conntrack-bridge' target/linux/airoha/an7581/target.mk 2>/dev/null; then
+  echo "    ✅ target.mk 已含 kmod-nf-conntrack-bridge"
 else
-  echo "    ⚠️  target.mk 未含 kmod-nf-conntrack-bridge，由 .config-lite 显式选中"
+  echo "    ⚠️  LEDE 默认包未含 kmod-nf-conntrack-bridge，由 .config-lede-lite 显式选中"
 fi
 
 ########################################
 # 3) 去除 dummy 接口
 ########################################
-echo "==== [diy-lite-p2] 去除 dummy 接口 ===="
-# 目标板上 dummy0 通常来自 base-files 的 network 模板（config device 'dummy0'），
-# 打包前直接从模板里删掉，避免首启被 netifd 创建；kmod-dummy 也不在 .config-lite 里选中。
+echo "==== [diy-lede-lite-p2] 去除 dummy 接口 ===="
 clean_dummy() {
   f="$1"
   [ -f "$f" ] || return 0
@@ -90,22 +83,21 @@ done
 ########################################
 # 4) 首启默认值: 桥接加速（生成 uci-defaults，不依赖仓库 files/）
 ########################################
-echo "==== [diy-lite-p2] 生成首启默认值 uci-defaults ===="
+echo "==== [diy-lede-lite-p2] 生成首启默认值 uci-defaults ===="
 UD_DIR=package/base-files/files/etc/uci-defaults
 mkdir -p "$UD_DIR"
-cat > "$UD_DIR/99-lite-bridge" <<'EOF'
+cat > "$UD_DIR/99-lede-lite-bridge" <<'EOF'
 #!/bin/sh
-# PonWrt 纯净版(桥接版) 首启默认值 —— 由构建脚本生成，不在仓库里保存实机配置
+# 040G-MD 纯净版(LEDE 源码) 首启默认值 —— 由构建脚本生成，不在仓库里保存实机配置
 # 幂等：重复执行无副作用
 
-# 1) 硬件加速: fw4 会为 inet 与 bridge 各生成一张 flowtable，
-#    L3(路由/NAT) 与 L2(桥接 lan<->lan) 都下到 Airoha PPE；
-#    flow_offloading_hw=1 才会把 flowtable 标记 offload 并下发。
+# 1) 硬件加速: fw4 为 inet 与 bridge 各生成一张 flowtable，
+#    L3(路由/NAT) 与 L2(桥接 lan<->lan) 都下到 Airoha PPE。
 uci -q set firewall.@defaults[0].flow_offloading='1'
 uci -q set firewall.@defaults[0].flow_offloading_hw='1'
 uci -q commit firewall
 
-# 2) dummy 接口兜底清理（模板已清理，这里处理升级上来的残留）
+# 2) dummy 接口兜底清理
 for s in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='dummy[^']*'$/\1/p"); do
 	uci -q delete network."$s"
 done
@@ -114,7 +106,7 @@ for s in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.ifn
 done
 uci -q commit network 2>/dev/null
 
-# 3) 主题固定内置 bootstrap
+# 3) 主题固定内置 bootstrap（LEDE 默认可能是 argon）
 if uci -q get luci.main >/dev/null 2>&1; then
 	uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
 	uci -q commit luci
@@ -125,17 +117,19 @@ fi
 
 exit 0
 EOF
-chmod 755 "$UD_DIR/99-lite-bridge"
-echo "    ✅ 已生成 $UD_DIR/99-lite-bridge（flow_offloading / flow_offloading_hw 默认开）"
+chmod 755 "$UD_DIR/99-lede-lite-bridge"
+echo "    ✅ 已生成 $UD_DIR/99-lede-lite-bridge（flow_offloading / flow_offloading_hw 默认开）"
 
 ########################################
 # 5) 默认 root 密码
 ########################################
-echo "==== [diy-lite-p2] 设置默认 root 密码 ===="
+echo "==== [diy-lede-lite-p2] 设置默认 root 密码 ===="
 SHADOW=package/base-files/files/etc/shadow
-[ -f "$SHADOW" ] || { echo "    ❌ 缺少 $SHADOW"; exit 1; }
+if [ ! -f "$SHADOW" ]; then
+  mkdir -p "$(dirname "$SHADOW")"
+  : > "$SHADOW"
+fi
 
-# 优先 sha256-crypt($5$)，失败则退回 md5-crypt($1$)
 HASH=""
 if command -v openssl >/dev/null 2>&1; then
   HASH=$(openssl passwd -5 "$ROOT_PASS" 2>/dev/null || true)
@@ -145,7 +139,6 @@ if [ -z "$HASH" ]; then
   echo "    ❌ 无法生成密码哈希（openssl 不可用）"; exit 1
 fi
 
-# 只替换 root 行的第 2 字段，其余字段与其它账号原样保留
 if grep -q '^root:' "$SHADOW"; then
   awk -F: -v h="$HASH" 'BEGIN{OFS=":"} $1=="root" && !d {$2=h; d=1} {print}' "$SHADOW" > "$SHADOW.new"
   mv "$SHADOW.new" "$SHADOW"
@@ -159,17 +152,15 @@ grep -m1 '^root:' "$SHADOW" | sed 's/^/       /'
 ########################################
 # 6) 关键包存在性检查（feeds 已 update）
 ########################################
-echo "==== [diy-lite-p2] 关键包存在性检查 ===="
+echo "==== [diy-lede-lite-p2] 关键包存在性检查 ===="
 fail=0
 chk() { if [ -d "$1" ]; then echo "    ✅ $1"; else echo "    ❌ 缺少 $1"; fail=1; fi; }
-# PON / 光模块驱动（feeds 提供；kmod-airoha-en7572 在 airoha-pon-frontends 里定义）
 chk feeds/pon_drivers/airoha-xpon
 chk feeds/pon_drivers/airoha-pon-frontends
-# ONU 用户态
 chk feeds/pon_userspace/luci-app-onu
 chk feeds/pon_userspace/luci-app-pon-status
 chk feeds/pon_userspace/airoha-pon-daemons
 if [ "$fail" = "1" ]; then echo "❌ 有包缺失，终止"; exit 1; fi
 echo "    ✅ 全部就位"
 
-echo "==== [diy-lite-p2] 完成（纯净版未拉取任何第三方插件、未引用仓库 files/）===="
+echo "==== [diy-lede-lite-p2] 完成（LEDE 纯净版未拉取任何第三方插件、未引用仓库 files/）===="

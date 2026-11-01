@@ -1,31 +1,31 @@
 #
-# PonWrt 纯净版 (Lite) 构建流水线 —— 与 openwrt-builder.yml 并列存在，互不影响
-#
+# 基于 P3TERX/Actions-OpenWrt 模板改造
 # 目标源码: pbs05/ponwrt (master)
 # 机型:     Nokia XG-040G-MD (UBI) / airoha an7581
 # 配置:     ponwrt 官方 configs/an7581.config + configs/release.config 作基线，
-#           仓库根 .config-lite 作叠加层
-# DIY:      diy-lite-part1.sh(改 feeds) / diy-lite-part2.sh(内核统计 + 去 dummy + 首启默认值 + root 密码)
-# 落地文件: 无 —— 纯净版【不引用仓库 files/】，出厂默认值全部由 diy-lite-part2.sh 在构建期写进源码树
-#           （不带实机 PPPoE 账号、不带个人密码、不带 UPnP/OAF 配置）
-#           默认 root 密码: admin123
+#           仓库根 .config 作叠加层（只写要额外选的包与开关）
+# DIY:      diy-part1(改 feeds) / diy-part2(内核+插件) / diy-part3(argon, feeds install 之后)
+# 落地文件: files/  (实机 etc/config、root 密码、fwxd 特性、OAF 应用图标、首启 uci-defaults)
 #
-# 纯净版 = 只保留"光口能起来 + 硬件加速转发"所需的最小集合:
-#   ✓ PON 驱动栈 + 光模块驱动 EN7572      (全部 =y)
-#   ✓ 2.5G PHY EN8811H 驱动与固件          (全部 =y)
-#   ✓ fw4 flowtable(L2 桥接 + L3) + PPE 硬件加速
-#   ✓ 每流字节统计 CONFIG_NET_AIROHA_FLOW_STATS=y
-#   ✓ luci-app-onu / luci-app-pon-status（配置注册用，非可选插件）
-#   ✓ 无 dummy 接口   ✓ 默认 root 密码 admin123
-#   ✗ argon 主题  ✗ OAF  ✗ mosdns v5  ✗ UPnP  ✗ NPU 面板  ✗ htop/nano  ✗ 仓库 files/ 覆盖层
-#
-# 与标准版的产物区分: Release tag 前缀 lite-040g-md-，清理时不会碰到标准版固件。
-# 工具链缓存与标准版共用同一个 key（toolchain-airoha-an7581-*），可直接复用已编好的工具链。
+# 关键特性:
+#   - 桥接(L2)/L3 硬件加速: fw4 flowtable + PPE, 默认 flow_offloading=1
+#   - 每流字节统计: CONFIG_NET_AIROHA_FLOW_STATS=y (airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS)
+#   - PON 光模块驱动: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572，全部强制 =y
+#   - 2.5G 网口: kmod-phy-airoha-en8811h + airoha-en8811h-firmware，强制 =y（lan1 2500base-x）
+#   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
+#   - OAF 应用识别: 先删掉源码/feeds 里自带的 OpenAppFilter，再重新 clone
+#                  destan19/OpenAppFilter 最新版（kmod-oaf + appfilter + luci-app-oaf）
+#   - UPnP: miniupnpd-nftables + luci-app-upnp
+#   - mosdns v5: sbwml/luci-app-mosdns v5 整仓（本体 5.3.x + LuCI + geo2txt）+ sbwml v2ray-geodata，
+#                Go 工具链同步换成 sbwml/packages_lang_golang 27.x（Go 1.27.3）
+#   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
+#   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
 #
 
-name: PonWrt-040G-MD-Lite
+name: 040G-MD 标准版 (PonWrt)
 
 on:
+  repository_dispatch:
   workflow_dispatch:
     inputs:
       ssh:
@@ -37,7 +37,8 @@ permissions:
   contents: write
   actions: write
 
-# 与标准版共用 toolchain-cache 这个 Release，避免两个工作流同时写缓存
+# 与纯净版 (build-040g-ponwrt-lite.yml) 共用 toolchain-cache 这个 Release，
+# 同组串行，避免两个工作流同时写缓存互相覆盖
 concurrency:
   group: ponwrt-toolchain-cache
   cancel-in-progress: false
@@ -45,12 +46,12 @@ concurrency:
 env:
   REPO_URL: https://github.com/pbs05/ponwrt
   REPO_BRANCH: master
-  CONFIG_FILE: .config-lite
-  DIY_P1_SH: diy-lite-part1.sh
-  DIY_P2_SH: diy-lite-part2.sh
-  ROOT_PASS: admin123
+  CONFIG_FILE: .config-ponwrt-full
+  DIY_P1_SH: diy-ponwrt-full-1.sh
+  DIY_P2_SH: diy-ponwrt-full-2.sh
+  DIY_P3_SH: diy-ponwrt-full-3.sh
   UPLOAD_RELEASE: true
-  DEVICE_NAME: lite-040g-md
+  DEVICE_NAME: 040g-md
   TZ: Asia/Shanghai
 
 jobs:
@@ -92,26 +93,38 @@ jobs:
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
-    - name: Kernel tweaks / DIY part 2
+    # 自定义插件必须在 update 之后 / install 之前执行
+    - name: Custom packages / DIY part 2
       run: |
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      run: |
+        cd openwrt
+        # 个别 feed 包可能与本地 package/ 里的同名包冲突（argon / oaf / mosdns 已由 diy 脚本接管），
+        # install 返回非 0 时继续，真正的缺失由下一步的包校验兜底。
+        ./scripts/feeds install -a || echo "⚠️  feeds install 返回非 0，继续（后续有包存在性校验）"
+
+    # argon v3.1.1 必须在 feeds install 之后覆盖，否则会被 feeds 里的旧版顶掉
+    - name: Argon theme v3.1.1 / DIY part 3
+      run: |
+        chmod +x $DIY_P3_SH
+        $GITHUB_WORKSPACE/$DIY_P3_SH
 
     - name: Load custom configuration
       run: |
+        mkdir -p openwrt/files
+        if [ -d files ]; then cp -a files/. openwrt/files/ && echo "files/ 已合并进 openwrt/files ($(find openwrt/files -type f | wc -l) 个文件)"; fi
         cd openwrt
-        # 纯净版不合并仓库 files/，固件只带上游默认配置 + diy-lite-part2.sh 写入的出厂默认值
         # 1) 官方基线: ponwrt 自带 configs/an7581.config + configs/release.config
         #    （含 UBIFS / initramfs / squashfs / 内核参数等镜像级设置，手写种子缺失会编出不能启动的镜像）
         ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
         # 2) 只编本机: 去掉其它机型的 DEVICE 选择，保留官方 MULTI_PROFILE 模式
         sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
         echo 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y' >> .config
-        # 3) 叠加纯净版的 .config-lite
+        # 3) 叠加仓库里的 .config（本仓库的包选择 / 开关）
         cat "$GITHUB_WORKSPACE/$CONFIG_FILE" >> .config
         make defconfig
         echo "===== 目标相关行 ====="
@@ -123,6 +136,8 @@ jobs:
         cd openwrt
         BOARD=$(grep '^CONFIG_TARGET_BOARD=' .config | cut -d'"' -f2)
         SUB=$(grep '^CONFIG_TARGET_SUBTARGET=' .config | cut -d'"' -f2)
+        # 单 profile 符号: CONFIG_TARGET_<board>_<sub>_DEVICE_<dev>=y
+        # 多 profile 符号: CONFIG_TARGET_DEVICE_<board>_<sub>_DEVICE_<dev>=y
         DEV=$(grep -oE '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia[^=]*=y' .config | head -1 | sed -r 's/.*DEVICE_(.*)=y/\1/')
         [ -n "$DEV" ] || DEV=$(grep -oE '^CONFIG_TARGET_airoha_an7581_DEVICE_nokia[^=]*=y' .config | head -1 | sed -r 's/.*DEVICE_(.*)=y/\1/')
         echo "board=$BOARD subtarget=$SUB device=$DEV"
@@ -131,12 +146,13 @@ jobs:
         fi
         if [ "$DEV" != "nokia_xg-040g-md-ubi" ]; then
           echo "❌ 设备不符: 期望 nokia_xg-040g-md-ubi, 实际 '$DEV'"
+          echo "--- 可用的 nokia 设备符号 ---"
           grep -E 'nokia' .config || true
           exit 1
         fi
         echo "✅ 目标校验通过: airoha/an7581/$DEV"
 
-    - name: Verify PON / 2.5G / accel (lite)
+    - name: Verify PON / 2.5G / accel / plugins
       run: |
         cd openwrt
         ok=1
@@ -147,14 +163,8 @@ jobs:
         # 必须编进内核镜像(=y)，不能是 =m 外挂模块
         needy() {
           if grep -qE "^$1=y$" .config; then echo "✅ $1=y";
-          else echo "❌ $1 不是 =y（当前: $(grep -E "^$1=" .config || echo '未出现')）"; ok=0; fi
-        }
-        # 纯净版必须【不存在】
-        absent() {
-          if grep -qE "^$1=[ym]$" .config; then
-            echo "❌ 纯净版不应包含 $1（当前: $(grep -E "^$1=" .config)）"; ok=0
           else
-            echo "✅ 已排除 $1"
+            echo "❌ $1 不是 =y（当前: $(grep -E "^$1=" .config || echo '未出现')）"; ok=0
           fi
         }
         echo "----- PON 驱动栈 / 光模块驱动（强制 =y）-----"
@@ -168,55 +178,62 @@ jobs:
         needy CONFIG_PACKAGE_airoha-en8811h-firmware
         echo "----- 硬件加速 (L2 桥接 / L3) -----"
         need CONFIG_PACKAGE_kmod-nf-conntrack-bridge
-        need CONFIG_PACKAGE_kmod-nft-offload
-        need CONFIG_PACKAGE_kmod-nf-flow
+        if grep -qE '^CONFIG_PACKAGE_kmod-nft-offload=[ym]$' .config; then
+          echo "✅ CONFIG_PACKAGE_kmod-nft-offload"
+        else
+          echo "⚠️  kmod-nft-offload 未显式选中(由 firewall4 依赖带入, 下一步会复查)"
+        fi
         echo "----- 内核开关: 每流统计 -----"
         if grep -qE '^CONFIG_NET_AIROHA_FLOW_STATS=y' target/linux/airoha/an7581/config-6.18; then
           echo "✅ CONFIG_NET_AIROHA_FLOW_STATS=y (config-6.18 已改写)"
         else
           echo "❌ CONFIG_NET_AIROHA_FLOW_STATS 未在 config-6.18 中打开"; ok=0
         fi
-        echo "----- 基础管理界面 -----"
+        echo "----- 插件 -----"
+        need CONFIG_PACKAGE_luci-theme-argon
+        need CONFIG_PACKAGE_luci-app-airoha-npu
         need CONFIG_PACKAGE_luci-app-onu
         need CONFIG_PACKAGE_luci-app-pon-status
-        need CONFIG_PACKAGE_luci-theme-bootstrap
-        echo "----- 纯净版排除项（argon / OAF / mosdns / UPnP / NPU 面板）-----"
-        absent CONFIG_PACKAGE_luci-theme-argon
-        absent CONFIG_PACKAGE_luci-app-argon-config
-        absent CONFIG_PACKAGE_kmod-oaf
-        absent CONFIG_PACKAGE_appfilter
-        absent CONFIG_PACKAGE_luci-app-oaf
-        absent CONFIG_PACKAGE_mosdns
-        absent CONFIG_PACKAGE_luci-app-mosdns
-        absent CONFIG_PACKAGE_geo2txt
-        absent CONFIG_PACKAGE_luci-app-upnp
-        absent CONFIG_PACKAGE_miniupnpd-nftables
-        absent CONFIG_PACKAGE_luci-app-airoha-npu
+        echo "----- OAF 应用识别 (对应 files/ 里的 oaf 图标与 fwxd/feature.bin) -----"
+        need CONFIG_PACKAGE_kmod-oaf
+        need CONFIG_PACKAGE_appfilter
+        need CONFIG_PACKAGE_luci-app-oaf
+        echo "----- UPnP -----"
+        need CONFIG_PACKAGE_luci-app-upnp
+        need CONFIG_PACKAGE_miniupnpd-nftables
+        echo "----- mosdns v5 / Go 工具链 -----"
+        need CONFIG_PACKAGE_mosdns
+        need CONFIG_PACKAGE_luci-app-mosdns
+        need CONFIG_PACKAGE_geo2txt
+        need CONFIG_PACKAGE_v2ray-geoip
+        need CONFIG_PACKAGE_v2ray-geosite
+        if [ -f feeds/packages/lang/golang/Makefile ]; then
+          echo "✅ Go: $(grep -m1 '^PKG_VERSION' feeds/packages/lang/golang/Makefile)"
+          if grep -qE '^(mosdns|PKG_VERSION):=5\.' package/mosdns/mosdns/Makefile 2>/dev/null; then
+            echo "✅ mosdns: $(grep -m1 '^PKG_VERSION' package/mosdns/mosdns/Makefile)"
+          else
+            echo "❌ package/mosdns/mosdns 不是 v5 分支产物"; ok=0
+          fi
+        else
+          echo "❌ feeds/packages/lang/golang 缺失"; ok=0
+        fi
+        echo "----- OAF 版本（应是重新拉取的上游最新）-----"
+        echo "    appfilter: $(grep -m1 '^PKG_VERSION' package/open-app-filter/Makefile 2>/dev/null || echo '缺失')"
+        echo "    luci-app-oaf: $(grep -m1 '^PKG_VERSION' package/luci-app-oaf/Makefile 2>/dev/null || echo '缺失')"
+        echo "----- files/ 叠加层 -----"
+        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow; do
+          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
+        done
+        if ls files/www/luci-static/resources/oaf/app_icons/*.png >/dev/null 2>&1; then
+          echo "✅ OAF 应用图标 $(ls files/www/luci-static/resources/oaf/app_icons/*.png | wc -l) 个"
+        else
+          echo "⚠️  files/ 中没有 OAF 应用图标"
+        fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
           echo "❌ kmod-dummy 仍被选中"; ok=0
         else
           echo "✅ kmod-dummy 未选中"
-        fi
-        echo "----- 出厂默认值（构建期写入源码树，不依赖仓库 files/）-----"
-        if grep -qE '^root:[^:]+:' package/base-files/files/etc/shadow; then
-          echo "✅ root 密码已设置（$(grep -m1 '^root:' package/base-files/files/etc/shadow | cut -c6-9)... 哈希）"
-        else
-          echo "❌ root 密码未设置"; ok=0
-        fi
-        if [ -f package/base-files/files/etc/uci-defaults/99-lite-bridge ]; then
-          echo "✅ 首启默认值 uci-defaults/99-lite-bridge 已生成"
-          grep -q "flow_offloading_hw='1'" package/base-files/files/etc/uci-defaults/99-lite-bridge \
-            && echo "   → flow_offloading_hw=1" || { echo "❌ uci-defaults 未打开硬件加速"; ok=0; }
-        else
-          echo "❌ 缺少 uci-defaults/99-lite-bridge"; ok=0
-        fi
-        echo "----- 未引用仓库 files/ -----"
-        if [ -d "$GITHUB_WORKSPACE/files" ] && [ -d files ] && [ "$(ls -A files 2>/dev/null)" ]; then
-          echo "⚠️  openwrt/files 非空（应只由 diy 脚本写入）"
-          ls -R files | head -20
-        else
-          echo "✅ openwrt/files 为空，固件不含仓库覆盖层"
         fi
         if [ "$ok" != "1" ]; then echo "❌ 校验失败, 终止编译"; exit 1; fi
         echo "✅ 全部校验通过"
@@ -355,8 +372,8 @@ jobs:
             && echo "✅ 内核已编入每流统计" \
             || echo "⚠️  CONFIG_NET_AIROHA_FLOW_STATS 未生效(检查 Kconfig 依赖)"
         fi
-        echo "===== 镜像体积（纯净版应明显小于标准版）====="
-        ls -lh bin/targets/airoha/an7581/*.itb bin/targets/airoha/an7581/*.bin 2>/dev/null || true
+        echo "===== 生成的包 (PON / PHY) ====="
+        ls bin/targets/airoha/an7581/packages/ 2>/dev/null | grep -iE 'airoha-(xpon|en7572|pon)|en8811h' || true
 
     - name: Check space usage
       if: (!cancelled())
@@ -378,20 +395,17 @@ jobs:
         echo "release_tag=${DEVICE_NAME}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
         {
-          echo "## PonWrt 纯净版固件 (Nokia XG-040G-MD)"
+          echo "## PonWrt 固件 (Nokia XG-040G-MD)"
           echo ""
           echo "| 项目 | 详情 |"
           echo "|------|------|"
           echo "| 源码 | $REPO_URL ($REPO_BRANCH) |"
           echo "| 设备 | airoha/an7581 / nokia_xg-040g-md-ubi |"
-          echo "| 定位 | 纯净版: 仅光口 + 硬件加速转发，无第三方插件 |"
           echo "| 硬件加速 | fw4 flowtable(L2+L3) + PPE, 默认 flow_offloading=1 |"
           echo "| 每流统计 | CONFIG_NET_AIROHA_FLOW_STATS=y |"
           echo "| PON | airoha-xpon + pon-frontend + en7572 |"
           echo "| 2.5G | phy-airoha-en8811h (lan1) |"
-          echo "| 主题 | luci-theme-bootstrap（不含 argon）|"
-          echo "| 已排除 | argon / OAF / mosdns / UPnP / NPU 面板 |"
-          echo "| 出厂配置 | 不含仓库 files/ 覆盖层，默认 root 密码 \`admin123\` |"
+          echo "| 插件 | luci-app-onu / luci-app-airoha-npu / argon v3.1.1 |"
           echo "| 时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
         } > release.txt
 
@@ -422,6 +436,6 @@ jobs:
       with:
         keep_latest: 5
         delete_tags: true
-        delete_tag_pattern: '^lite-040g-md-'
+        delete_tag_pattern: '^040g-md-'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

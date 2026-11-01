@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# diy-part2.sh —— 在 feeds update 之后、feeds install 之前执行
+# diy-ponwrt-full-2.sh —— 在 feeds update 之后、feeds install 之前执行
 #
 # 执行时机很关键（参考 Actions-OpenWrt-S20P 的做法）:
 #   - 必须在 feeds update -a 之后: 否则 packages feed 会把 lang/golang 目录重新拉回覆盖
@@ -64,29 +64,40 @@ fi
 #    换成 sbwml/packages_lang_golang（26.x/27.x 分支持续跟进上游），
 #    顺序: 27.x -> 26.x -> 25.x 逐级回退，保证不会因为分支改名整体失败。
 ########################################
-echo "==== [diy-part2] 替换 Go 工具链为最新版 ===="
+echo "==== [diy-full-p2] 替换 Go 工具链为最新版 ===="
 GO_REPO=https://github.com/sbwml/packages_lang_golang
 GO_DIR=feeds/packages/lang/golang
+GO_TMP=/tmp/golang-src
 GO_BRANCH=""
-rm -rf "$GO_DIR"
+rm -rf "$GO_TMP"
 for b in 27.x 26.x 25.x; do
-  if git clone --depth 1 -b "$b" "$GO_REPO" "$GO_DIR" 2>/dev/null; then
+  rm -rf "$GO_TMP"
+  if git clone --depth 1 -b "$b" "$GO_REPO" "$GO_TMP" 2>/dev/null; then
     GO_BRANCH="$b"
     break
   fi
-  rm -rf "$GO_DIR"
   echo "    ⚠️  $b 分支拉取失败，尝试下一个"
 done
-if [ -z "$GO_BRANCH" ] || [ ! -f "$GO_DIR/Makefile" ]; then
-  echo "    ❌ Go 工具链替换失败"; exit 1
+if [ -z "$GO_BRANCH" ]; then
+  echo "    ❌ Go 工具链替换失败（三个分支都拉不下来）"; exit 1
 fi
-GO_VER=$(grep -m1 '^PKG_VERSION' "$GO_DIR/Makefile" | cut -d= -f2 | tr -d ' ')
-GO_MM=$(grep -m1 '^GO_VERSION_MAJOR_MINOR' "$GO_DIR/Makefile" | cut -d= -f2 | tr -d ' ')
-echo "    ✅ 分支 $GO_BRANCH / Go $GO_VER (${GO_MM})"
-# golang-package.mk 必须在
-if [ ! -f "$GO_DIR/golang-package.mk" ]; then
-  echo "    ❌ 缺少 golang-package.mk"; exit 1
+# 布局兼容: 上游 packages 仓库是 Makefile 与 golang-package.mk 同级；
+# sbwml 仓库根放 *.mk + golang-build.sh，包的 Makefile 在 golang/ 子目录。
+# 整个仓库原样铺到 lang/golang 下，两种布局都能被 buildroot 扫到。
+rm -rf "$GO_DIR"
+mkdir -p "$GO_DIR"
+cp -a "$GO_TMP"/. "$GO_DIR"/
+rm -rf "$GO_TMP"
+GO_MK=""
+for c in "$GO_DIR/Makefile" "$GO_DIR/golang/Makefile"; do
+  if [ -f "$c" ]; then GO_MK="$c"; break; fi
+done
+if [ -z "$GO_MK" ] || [ ! -f "$GO_DIR/golang-package.mk" ]; then
+  echo "    ❌ Go 工具链布局异常（Makefile: ${GO_MK:-缺失}）"; exit 1
 fi
+GO_VER=$(grep -m1 '^PKG_VERSION' "$GO_MK" | cut -d= -f2 | tr -d ' ')
+GO_MM=$(grep -m1 '^GO_VERSION_MAJOR_MINOR' "$GO_MK" | cut -d= -f2 | tr -d ' ')
+echo "    ✅ 分支 $GO_BRANCH / Go $GO_VER (${GO_MM}) / Makefile: $GO_MK"
 
 ########################################
 # 3) 清理源码/feeds 里自带的 mosdns、v2ray-geodata

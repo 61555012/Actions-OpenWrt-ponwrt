@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# diy-part3.sh —— 在 feeds install -a 之后执行
+# diy-ponwrt-full-3.sh —— 在 feeds install -a 之后执行
 #
 # 做两件事:
 #   1) 用 jerrykuku/luci-theme-argon v3.1.1 覆盖 feeds 里自带的旧版 argon
