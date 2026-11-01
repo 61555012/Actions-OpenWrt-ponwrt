@@ -37,6 +37,12 @@ permissions:
   contents: write
   actions: write
 
+# 与纯净版 (openwrt-builder-lite.yml) 共用 toolchain-cache 这个 Release，
+# 同组串行，避免两个工作流同时写缓存互相覆盖
+concurrency:
+  group: ponwrt-toolchain-cache
+  cancel-in-progress: false
+
 env:
   REPO_URL: https://github.com/pbs05/ponwrt
   REPO_BRANCH: master

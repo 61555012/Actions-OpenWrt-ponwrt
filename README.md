@@ -5,10 +5,11 @@
 ## 目录
 
 ```
-.github/workflows/openwrt-builder.yml   # 工作流（唯一的编译入口）
+# ========== 标准版 ==========
+.github/workflows/openwrt-builder.yml   # 工作流（标准版）
 .config                                 # 叠加层：只写官方基线之外要加的包/开关
 diy-part1.sh                            # feeds update 之前：替换/追加 feed
-diy-part2.sh                            # feeds update 之前后：内核统计开关、OAF、mosdns、NPU 面板、去 dummy
+diy-part2.sh                            # feeds update 之后：内核统计开关、OAF、mosdns、NPU 面板、去 dummy
 diy-part3.sh                            # feeds install 之后：argon v3.1.1 覆盖 feeds 旧版
 files/                                  # 原样合并进固件根目录
   etc/config/{network,pon,firewall,upnpd}   # 实机配置（PPPoE、光猫注册、UPnP、加速开关）
@@ -16,6 +17,13 @@ files/                                  # 原样合并进固件根目录
   etc/fwxd/feature.bin                      # OAF 特性库
   www/luci-static/resources/oaf/app_icons/  # OAF 应用图标（562 个）
   etc/uci-defaults/99-040g-md               # 首启：加速开关 / 去 dummy / 主题默认值
+
+# ========== 纯净版（Lite / 桥接版）==========
+.github/workflows/openwrt-builder-lite.yml  # 工作流（纯净版）
+.config-lite                                # 纯净版叠加层：只有 PON / 2.5G / 加速，其余显式关闭
+diy-lite-part1.sh                           # feeds update 之前：只改 pon_userspace 源
+diy-lite-part2.sh                           # feeds update 之后：内核统计 + 去 dummy + 出厂默认值 + root 密码
+                                            # （纯净版不引用 files/，默认值全在脚本里写进源码树）
 ```
 
 ## 编译出来的东西
@@ -104,11 +112,53 @@ feeds（immortalwrt/luci）里自带同名 `luci-theme-argon`。如果在 `feeds
 
 缓存命中会自动跳过 `make tools/install` / `toolchain/install`，并用 `sed` 去掉主 `Makefile` 里的 toolchain 依赖。首次约 3~5 小时（含 rust 交叉编译 `airoha-pond`、Go 编译 `mosdns`），之后约 40~70 分钟。
 
+## 纯净版（Lite）
+
+仓库里并存两条编译流水线，互不干扰，产物用 tag 前缀区分：
+
+| | 标准版 | 纯净版（Lite） |
+|---|---|---|
+| 工作流 | `openwrt-builder.yml` | `openwrt-builder-lite.yml` |
+| 配置 | `.config` | `.config-lite` |
+| 落地文件 | `files/` | **无**（不引用仓库 files/，默认值写进脚本） |
+| DIY 脚本 | `diy-part1/2/3.sh` | `diy-lite-part1/2.sh`（无 part3，不换 argon） |
+| Release tag | `040g-md-*` | `lite-040g-md-*` |
+| 默认密码 | 见 `files/etc/shadow` | `admin123` |
+| 定位 | 光口 + 加速 + OAF/UPnP/mosdns/argon | **只有光口 + 硬件加速转发** |
+
+纯净版保留（都是一台 ONU 上网绕不开的东西）：
+
+- PON 驱动栈 `kmod-airoha-xpon` / `kmod-airoha-pon-frontend` / `kmod-airoha-en7572` + `airoha-pond` / `airoha-ponctl`，全部 `=y`
+- 2.5G PHY `kmod-phy-airoha-en8811h` + 固件，全部 `=y`
+- 硬件加速：`kmod-nf-conntrack-bridge` / `kmod-nft-offload` / `kmod-nf-flow` + 内核 `CONFIG_NET_AIROHA_FLOW_STATS=y`，`flow_offloading=1`、`flow_offloading_hw=1`（L2 桥接 + L3 路由都走 PPE）
+- `luci-app-onu` / `luci-app-pon-status`（**配注册/桥接要用，算基础功能不是可选插件**）
+- 内置 `luci-theme-bootstrap` 主题；不选 `kmod-dummy`
+
+**不带仓库 `files/`**：纯净版不在固件里塞任何实机配置（没有 PPPoE 账号、没有原 root 密码哈希、没有 UPnP/OAF 配置），出厂状态 = 上游默认 + 下面这些由脚本写入的默认值：
+
+| 默认值 | 写入位置 | 说明 |
+|---|---|---|
+| root 密码 `admin123` | `package/base-files/files/etc/shadow`（构建期用 `openssl passwd -5` 生成哈希） | 可在工作流 env 里改 `ROOT_PASS` |
+| `flow_offloading=1` + `flow_offloading_hw=1` | `package/base-files/files/etc/uci-defaults/99-lite-bridge`（构建期生成） | 首启即开 L2/L3 硬件加速，无需进 LuCI 手动勾 |
+| 无 dummy 接口 | 同上去模板 + 首启兜底清理 | — |
+
+也就是说，刷进去之后是干净的上游默认网络（LAN 侧 `192.168.1.1`，`root` / `admin123`），PPPoE 或桥接、PON 注册都在 **网络 → ONU** 里自己配，不用清理别人的残留配置。
+
+纯净版显式关闭（写成 `# CONFIG_... is not set`，防止官方基线或 feeds 默认值把它们带进来）：
+
+`luci-theme-argon`、`luci-app-argon-config`、`kmod-oaf`、`appfilter`、`luci-app-oaf`、`mosdns`、`luci-app-mosdns`、`geo2txt`、`v2ray-geoip/geosite`、`luci-app-upnp`、`miniupnpd-nftables`、`luci-app-airoha-npu`、`htop/nano`。
+
+工作流里有 `absent()` 断言：一旦哪个被依赖重新带进 `.config` 就直接失败，不会悄悄编出一个"不纯净"的固件。纯净版**不换 Go 工具链、不 clone 任何第三方仓库**，所以首次编译比标准版快，产物也更小。
+
+两条流水线共用同一个 `toolchain-cache` Release 与同一把缓存键（`toolchain-airoha-an7581-<hash>`），先进先得：标准版编过一次，纯净版就直接复用工具链，反之亦然。为此两边都设了 `concurrency: ponwrt-toolchain-cache` 串行，避免同时写缓存。
+
+> 想把纯净版做到极致：删掉 `diy-lite-part1.sh` 里的 feed 替换，并把 `.config-lite` 里的 `luci-app-onu` / `luci-app-pon-status` 关掉，就只剩纯上游 `luci-app-pon` + 驱动，全部靠 UCI 手工配 `/etc/config/pon`。
+
 ## 使用方法
 
-1. 改完代码直接推到 `main`，或 **Actions → PonWrt-040G-MD → Run workflow**。
+1. 改完代码直接推到 `main`，或 **Actions → PonWrt-040G-MD → Run workflow**（纯净版是 **Actions → PonWrt-040G-MD-Lite → Run workflow**，只支持手动触发）。
 2. 仓库 **Settings → Actions → General → Workflow permissions** 需为 **Read and write**（Release 上传与缓存备份要用）。
-3. 完成后到 **Releases** 下载 `040g-md-*.itb`。
+3. 完成后到 **Releases** 下载 `040g-md-*.itb`（纯净版为 `lite-040g-md-*.itb`）。
 4. 需要进构建机调试，Run workflow 时把 `ssh` 填 `true`（action-tmate）。
 
 > 编译依赖用 ponwrt README 那份官方列表（比 P3TERX 模板多 `clang` / `lld` / `llvm` / `libyaml-dev` / `python3-ply` / `python3-docutils` / `re2c` / `lib32gcc-s1`）。
