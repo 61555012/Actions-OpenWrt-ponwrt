@@ -1,40 +1,60 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
+# 基于 P3TERX/Actions-OpenWrt 模板改造
+# 目标源码: pbs05/ponwrt (master)
+# 机型:     Nokia XG-040G-MD (UBI) / airoha an7581
+# 配置:     ponwrt 官方 configs/an7581.config + configs/release.config 作基线，
+#           仓库根 .config 作叠加层（只写要额外选的包与开关）
+# DIY:      diy-part1(改 feeds) / diy-part2(内核+插件) / diy-part3(argon, feeds install 之后)
+# 落地文件: files/  (实机 etc/config、root 密码、fwxd 特性、OAF 应用图标、首启 uci-defaults)
 #
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
-#
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
+# 关键特性:
+#   - 桥接(L2)/L3 硬件加速: fw4 flowtable + PPE, 默认 flow_offloading=1
+#   - 每流字节统计: CONFIG_NET_AIROHA_FLOW_STATS=y (airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS)
+#   - PON: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572 (光前端 EN7572)
+#   - 2.5G 网口: kmod-phy-airoha-en8811h (lan1, 2500base-x)
+#   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
+#   - OAF 应用识别: kmod-oaf + appfilter + luci-app-oaf（destan19/OpenAppFilter 最新版，
+#                  配合 files/ 的图标与 feature.bin）
+#   - UPnP: miniupnpd-nftables + luci-app-upnp
+#   - mosdns v5: feeds 的 mosdns 5.3.x + sbwml luci-app-mosdns + geo2txt + v2ray geo 数据
+#   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
+#   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
 #
 
-name: OpenWrt Builder
+name: PonWrt-040G-MD
 
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH 连接调试'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  actions: write
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_URL: https://github.com/pbs05/ponwrt
   REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
+  DIY_P3_SH: diy-part3.sh
   UPLOAD_RELEASE: true
+  DEVICE_NAME: 040g-md
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Initialization environment
       env:
@@ -43,7 +63,7 @@ jobs:
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
         sudo docker image prune --all --force
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -54,12 +74,11 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        git clone "$REPO_URL" -b "$REPO_BRANCH" --single-branch --depth=1 openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load custom feeds
+    - name: Load custom feeds / DIY part 1
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
@@ -67,23 +86,238 @@ jobs:
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
+    # 自定义插件必须在 update 之后 / install 之前执行
+    - name: Custom packages / DIY part 2
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Download package
-      id: package
+    - name: Install feeds
       run: |
         cd openwrt
+        # 个别 feed 包可能与本地 package/ 里的同名包冲突（argon / oaf / mosdns 已由 diy 脚本接管），
+        # install 返回非 0 时继续，真正的缺失由下一步的包校验兜底。
+        ./scripts/feeds install -a || echo "⚠️  feeds install 返回非 0，继续（后续有包存在性校验）"
+
+    # argon v3.1.1 必须在 feeds install 之后覆盖，否则会被 feeds 里的旧版顶掉
+    - name: Argon theme v3.1.1 / DIY part 3
+      run: |
+        chmod +x $DIY_P3_SH
+        $GITHUB_WORKSPACE/$DIY_P3_SH
+
+    - name: Load custom configuration
+      run: |
+        mkdir -p openwrt/files
+        if [ -d files ]; then cp -a files/. openwrt/files/ && echo "files/ 已合并进 openwrt/files ($(find openwrt/files -type f | wc -l) 个文件)"; fi
+        cd openwrt
+        # 1) 官方基线: ponwrt 自带 configs/an7581.config + configs/release.config
+        #    （含 UBIFS / initramfs / squashfs / 内核参数等镜像级设置，手写种子缺失会编出不能启动的镜像）
+        ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+        # 2) 只编本机: 去掉其它机型的 DEVICE 选择，保留官方 MULTI_PROFILE 模式
+        sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+        echo 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y' >> .config
+        # 3) 叠加仓库里的 .config（本仓库的包选择 / 开关）
+        cat "$GITHUB_WORKSPACE/$CONFIG_FILE" >> .config
         make defconfig
-        make download -j8
+        echo "===== 目标相关行 ====="
+        grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE)=' .config
+        grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
+
+    - name: Verify target device
+      run: |
+        cd openwrt
+        BOARD=$(grep '^CONFIG_TARGET_BOARD=' .config | cut -d'"' -f2)
+        SUB=$(grep '^CONFIG_TARGET_SUBTARGET=' .config | cut -d'"' -f2)
+        # 单 profile 符号: CONFIG_TARGET_<board>_<sub>_DEVICE_<dev>=y
+        # 多 profile 符号: CONFIG_TARGET_DEVICE_<board>_<sub>_DEVICE_<dev>=y
+        DEV=$(grep -oE '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia[^=]*=y' .config | head -1 | sed -r 's/.*DEVICE_(.*)=y/\1/')
+        [ -n "$DEV" ] || DEV=$(grep -oE '^CONFIG_TARGET_airoha_an7581_DEVICE_nokia[^=]*=y' .config | head -1 | sed -r 's/.*DEVICE_(.*)=y/\1/')
+        echo "board=$BOARD subtarget=$SUB device=$DEV"
+        if [ "$BOARD" != "airoha" ] || [ "$SUB" != "an7581" ]; then
+          echo "❌ 目标不符: 期望 airoha/an7581, 实际 $BOARD/$SUB"; exit 1
+        fi
+        if [ "$DEV" != "nokia_xg-040g-md-ubi" ]; then
+          echo "❌ 设备不符: 期望 nokia_xg-040g-md-ubi, 实际 '$DEV'"
+          echo "--- 可用的 nokia 设备符号 ---"
+          grep -E 'nokia' .config || true
+          exit 1
+        fi
+        echo "✅ 目标校验通过: airoha/an7581/$DEV"
+
+    - name: Verify PON / 2.5G / accel / plugins
+      run: |
+        cd openwrt
+        ok=1
+        need() {
+          if grep -qE "^$1=[ym]$" .config; then echo "✅ $1";
+          else echo "❌ 缺少 $1"; ok=0; fi
+        }
+        echo "----- PON 驱动栈 -----"
+        need CONFIG_PACKAGE_kmod-airoha-xpon
+        need CONFIG_PACKAGE_kmod-airoha-pon-frontend
+        need CONFIG_PACKAGE_kmod-airoha-en7572
+        need CONFIG_PACKAGE_airoha-pond
+        need CONFIG_PACKAGE_airoha-ponctl
+        echo "----- 2.5G 网口 PHY (lan1 2500base-x) -----"
+        need CONFIG_PACKAGE_kmod-phy-airoha-en8811h
+        echo "----- 硬件加速 (L2 桥接 / L3) -----"
+        need CONFIG_PACKAGE_kmod-nf-conntrack-bridge
+        if grep -qE '^CONFIG_PACKAGE_kmod-nft-offload=[ym]$' .config; then
+          echo "✅ CONFIG_PACKAGE_kmod-nft-offload"
+        else
+          echo "⚠️  kmod-nft-offload 未显式选中(由 firewall4 依赖带入, 下一步会复查)"
+        fi
+        echo "----- 内核开关: 每流统计 -----"
+        if grep -qE '^CONFIG_NET_AIROHA_FLOW_STATS=y' target/linux/airoha/an7581/config-6.18; then
+          echo "✅ CONFIG_NET_AIROHA_FLOW_STATS=y (config-6.18 已改写)"
+        else
+          echo "❌ CONFIG_NET_AIROHA_FLOW_STATS 未在 config-6.18 中打开"; ok=0
+        fi
+        echo "----- 插件 -----"
+        need CONFIG_PACKAGE_luci-theme-argon
+        need CONFIG_PACKAGE_luci-app-airoha-npu
+        need CONFIG_PACKAGE_luci-app-onu
+        need CONFIG_PACKAGE_luci-app-pon-status
+        echo "----- OAF 应用识别 (对应 files/ 里的 oaf 图标与 fwxd/feature.bin) -----"
+        need CONFIG_PACKAGE_kmod-oaf
+        need CONFIG_PACKAGE_appfilter
+        need CONFIG_PACKAGE_luci-app-oaf
+        echo "----- UPnP -----"
+        need CONFIG_PACKAGE_luci-app-upnp
+        need CONFIG_PACKAGE_miniupnpd-nftables
+        echo "----- mosdns v5 -----"
+        need CONFIG_PACKAGE_mosdns
+        need CONFIG_PACKAGE_luci-app-mosdns
+        need CONFIG_PACKAGE_geo2txt
+        need CONFIG_PACKAGE_v2ray-geoip
+        need CONFIG_PACKAGE_v2ray-geosite
+        echo "----- files/ 叠加层 -----"
+        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow; do
+          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
+        done
+        if ls files/www/luci-static/resources/oaf/app_icons/*.png >/dev/null 2>&1; then
+          echo "✅ OAF 应用图标 $(ls files/www/luci-static/resources/oaf/app_icons/*.png | wc -l) 个"
+        else
+          echo "⚠️  files/ 中没有 OAF 应用图标"
+        fi
+        echo "----- dummy 接口已排除 -----"
+        if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
+          echo "❌ kmod-dummy 仍被选中"; ok=0
+        else
+          echo "✅ kmod-dummy 未选中"
+        fi
+        if [ "$ok" != "1" ]; then echo "❌ 校验失败, 终止编译"; exit 1; fi
+        echo "✅ 全部校验通过"
+
+    - name: Generate toolchain cache key
+      id: cache-key
+      run: |
+        cd openwrt
+        TOOLS_HASH=$(find tools toolchain -type f \( -name "Makefile" -o -name "*.mk" \) \
+          -exec md5sum {} + 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+        echo "CACHE_KEY=toolchain-airoha-an7581-${TOOLS_HASH:0:16}" >> $GITHUB_OUTPUT
+        echo "CACHE_PREFIX=toolchain-airoha-an7581" >> $GITHUB_OUTPUT
+        echo "缓存键: toolchain-airoha-an7581-${TOOLS_HASH:0:16}"
+
+    - name: Restore toolchain (actions/cache)
+      uses: actions/cache/restore@v4
+      id: cache-restore
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/host*
+          /workdir/openwrt/staging_dir/tool*
+        key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+    - name: Restore toolchain (Release backup)
+      if: steps.cache-restore.outputs.cache-hit != 'true'
+      id: release-restore
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd openwrt
+        KEY="${{ steps.cache-key.outputs.CACHE_KEY }}"
+        ASSET="${KEY}.tzst"
+        if ! gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          echo "restored=false" >> $GITHUB_OUTPUT
+          echo "toolchain-cache 不存在, 首次运行"
+          exit 0
+        fi
+        if gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$ASSET"; then
+          gh release download toolchain-cache --repo "$GITHUB_REPOSITORY" -p "$ASSET" -D .
+          if [ -e "$ASSET" ]; then
+            tar -I unzstd -xf "$ASSET" || tar -xf "$ASSET"
+            rm -f "$ASSET"
+            echo "restored=true" >> $GITHUB_OUTPUT
+            echo "Release 工具链恢复成功"
+          else
+            echo "restored=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "restored=false" >> $GITHUB_OUTPUT
+          echo "Release 中无该缓存: $ASSET"
+        fi
+
+    - name: Handle toolchain
+      id: toolchain
+      run: |
+        cd openwrt
+        if [ "${{ steps.cache-restore.outputs.cache-hit }}" = "true" ]; then
+          echo "actions/cache 命中, 跳过工具链编译"
+          echo "save_cache=false" >> $GITHUB_OUTPUT
+          echo "save_release=false" >> $GITHUB_OUTPUT
+        elif [ "${{ steps.release-restore.outputs.restored }}" = "true" ]; then
+          echo "Release 缓存命中, 回写 actions/cache"
+          echo "save_cache=true" >> $GITHUB_OUTPUT
+          echo "save_release=false" >> $GITHUB_OUTPUT
+        else
+          echo "无缓存, 开始编译工具链..."
+          make tools/install -j$(nproc) || make tools/install -j1 V=s
+          make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
+          echo "save_cache=true" >> $GITHUB_OUTPUT
+          echo "save_release=true" >> $GITHUB_OUTPUT
+        fi
+        sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
+        echo "Makefile 已修改: 后续跳过工具链重编译"
+
+    - name: Save toolchain (actions/cache)
+      uses: actions/cache/save@v4
+      if: steps.toolchain.outputs.save_cache == 'true'
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/host*
+          /workdir/openwrt/staging_dir/tool*
+        key: ${{ steps.cache-key.outputs.CACHE_KEY }}
+
+    - name: Save toolchain (Release backup)
+      if: steps.toolchain.outputs.save_release == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd openwrt
+        KEY="${{ steps.cache-key.outputs.CACHE_KEY }}"
+        PREFIX="${{ steps.cache-key.outputs.CACHE_PREFIX }}"
+        tar -I zstdmt -cf "${KEY}.tzst" staging_dir/host* staging_dir/tool*
+        ls -lh "${KEY}.tzst"
+        if ! gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          gh release create toolchain-cache --repo "$GITHUB_REPOSITORY" --title "Toolchain Cache" --notes "自动生成的工具链缓存, 请勿删除" --latest=false
+        fi
+        gh release view toolchain-cache --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep "^${PREFIX}" | while read -r old; do
+          echo "删除旧缓存: $old"
+          gh release delete-asset toolchain-cache "$old" --repo "$GITHUB_REPOSITORY" -y 2>/dev/null || true
+        done
+        gh release upload toolchain-cache "${KEY}.tzst" --repo "$GITHUB_REPOSITORY" --clobber
+        rm -f "${KEY}.tzst"
+
+    - name: SSH connection to Actions
+      uses: mxschmitt/action-tmate@v3
+      if: github.event.inputs.ssh == 'true'
+
+    - name: Download package
+      run: |
+        cd openwrt
+        make download -j8 || make download -j1 V=s
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
@@ -91,70 +325,89 @@ jobs:
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
+        echo "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Verify built kernel config
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt
+        KCFG=$(ls -d build_dir/target-*/linux-airoha_an7581/linux-*/.config 2>/dev/null | head -1)
+        echo "kernel config: $KCFG"
+        if [ -n "$KCFG" ]; then
+          for sym in CONFIG_NET_AIROHA_FLOW_STATS CONFIG_NET_AIROHA CONFIG_NF_FLOW_TABLE CONFIG_NFT_FLOW_OFFLOAD; do
+            echo "$(grep -E "^${sym}=" "$KCFG" || echo "$sym <未设置>")"
+          done
+          grep -qE '^CONFIG_NET_AIROHA_FLOW_STATS=y' "$KCFG" \
+            && echo "✅ 内核已编入每流统计" \
+            || echo "⚠️  CONFIG_NET_AIROHA_FLOW_STATS 未生效(检查 Kconfig 依赖)"
+        fi
+        echo "===== 生成的包 (PON / PHY) ====="
+        ls bin/targets/airoha/an7581/packages/ 2>/dev/null | grep -iE 'airoha-(xpon|en7572|pon)|en8811h' || true
 
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+        echo "release_tag=${DEVICE_NAME}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
+        {
+          echo "## PonWrt 固件 (Nokia XG-040G-MD)"
+          echo ""
+          echo "| 项目 | 详情 |"
+          echo "|------|------|"
+          echo "| 源码 | $REPO_URL ($REPO_BRANCH) |"
+          echo "| 设备 | airoha/an7581 / nokia_xg-040g-md-ubi |"
+          echo "| 硬件加速 | fw4 flowtable(L2+L3) + PPE, 默认 flow_offloading=1 |"
+          echo "| 每流统计 | CONFIG_NET_AIROHA_FLOW_STATS=y |"
+          echo "| PON | airoha-xpon + pon-frontend + en7572 |"
+          echo "| 2.5G | phy-airoha-en8811h (lan1) |"
+          echo "| 插件 | luci-app-onu / luci-app-airoha-npu / argon v3.1.1 |"
+          echo "| 时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
+        } > release.txt
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: |
+          ${{ env.FIRMWARE }}/*.itb
+          ${{ env.FIRMWARE }}/*.bin
+          ${{ env.FIRMWARE }}/*.manifest
+          ${{ env.FIRMWARE }}/*.tar.gz
 
     - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
+      uses: Mattraks/delete-workflow-runs@v2
       with:
-        retain_days: 0
-        keep_minimum_runs: 2
+        token: ${{ secrets.GITHUB_TOKEN }}
+        retain_days: 1
+        keep_minimum_runs: 5
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
+    - name: Remove old releases
+      uses: dev-drprasad/delete-older-releases@v0.3.4
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
-        keep_latest: 3
+        keep_latest: 5
         delete_tags: true
+        delete_tag_pattern: '^040g-md-'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

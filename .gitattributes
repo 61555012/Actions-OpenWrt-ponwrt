@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+# 脚本一律 LF，避免在 Windows 上编辑后被改成 CRLF 导致在 Linux 构建机上报 bad interpreter
+*.sh text eol=lf
+*.nft text eol=lf
+
+# 二进制文件不要做任何换行/文本转换
+*.png binary
+*.bin binary
+*.itb binary

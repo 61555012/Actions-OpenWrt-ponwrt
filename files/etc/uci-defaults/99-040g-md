@@ -1,0 +1,47 @@
+#!/bin/sh
+# 首次启动默认值 —— PonWrt / Nokia XG-040G-MD
+# 幂等：重复执行不会产生副作用
+
+#
+# 1) 硬件加速：fw4 会为 inet 和 bridge 各生成一张 flowtable，
+#    L3(路由/NAT) 与 L2(桥接 lan<->lan) 都走 Airoha PPE 硬件转发。
+#    flow_offloading_hw=1 才会把 flowtable 标记为 offload 并下到 PPE。
+#
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+uci -q commit firewall
+
+#
+# 2) 去除 dummy 接口（device 段与 interface 段一起清）
+#
+for s in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='dummy[^']*'$/\1/p"); do
+	uci -q delete network."$s"
+done
+for s in $(uci -q show network 2>/dev/null | grep -i '\.name=.dummy' | cut -d. -f2 | cut -d= -f1 | sort -u); do
+	uci -q delete network."$s"
+done
+# 遗留的 interface 段（proto=none, ifname=dummy0）
+for s in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.ifname='dummy[^']*'$/\1/p"); do
+	uci -q delete network."$s"
+done
+uci -q commit network
+
+#
+# 3) 默认主题 argon（居中登录页 + Bing 壁纸）
+#
+if uci -q get luci.main >/dev/null 2>&1; then
+	uci -q set luci.main.mediaurlbase='/luci-static/argon'
+	uci -q commit luci
+fi
+if uci -q get argon.@global[0] >/dev/null 2>&1; then
+	uci -q set argon.@global[0].login_style='centered'
+	uci -q set argon.@global[0].online_wallpaper='bing'
+	uci -q commit argon
+fi
+
+#
+# 4) 让 fw4 重新生成规则（含 bridge flowtable）
+#
+/etc/init.d/firewall reload >/dev/null 2>&1
+
+exit 0
