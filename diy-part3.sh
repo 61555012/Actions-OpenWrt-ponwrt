@@ -25,6 +25,23 @@ fi
 ARGON_REPO=https://github.com/jerrykuku/luci-theme-argon
 ARGON_REF=v3.1.1
 
+echo "==== [diy-part3] 清理 feeds install 留下的悬空链接 ===="
+# diy-part2 在 feeds install 之前删掉了 mosdns / v2ray-geodata 的 feed 目录，
+# feeds 索引里仍有条目，install 时可能生成指向已删除目录的软链；
+# 悬空链接会让 OpenWrt 扫描 package/ 时报错，这里统一清掉。
+if [ -d package/feeds ]; then
+  dangling=$(find package/feeds -maxdepth 3 -xtype l 2>/dev/null | wc -l)
+  find package/feeds -maxdepth 3 -xtype l -delete 2>/dev/null || true
+  echo "    已清理悬空链接 $dangling 个"
+fi
+# 同名包去重: 本仓库自己拉的版本优先
+for n in mosdns v2ray-geodata luci-app-mosdns; do
+  if [ -e "package/$n" ]; then
+    rm -rf package/feeds/*/"$n" 2>/dev/null || true
+    echo "    已移除 package/feeds/*/$n （使用 package/ 下的自拉版本）"
+  fi
+done
+
 echo "==== [diy-part3] 覆盖 argon 主题 -> ${ARGON_REF} ===="
 
 # 1) 清掉 feeds install 生成的软链（以及旧版兼容包）

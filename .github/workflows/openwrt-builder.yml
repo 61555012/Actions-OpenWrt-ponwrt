@@ -10,13 +10,14 @@
 # 关键特性:
 #   - 桥接(L2)/L3 硬件加速: fw4 flowtable + PPE, 默认 flow_offloading=1
 #   - 每流字节统计: CONFIG_NET_AIROHA_FLOW_STATS=y (airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS)
-#   - PON: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572 (光前端 EN7572)
-#   - 2.5G 网口: kmod-phy-airoha-en8811h (lan1, 2500base-x)
+#   - PON 光模块驱动: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572，全部强制 =y
+#   - 2.5G 网口: kmod-phy-airoha-en8811h + airoha-en8811h-firmware，强制 =y（lan1 2500base-x）
 #   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
-#   - OAF 应用识别: kmod-oaf + appfilter + luci-app-oaf（destan19/OpenAppFilter 最新版，
-#                  配合 files/ 的图标与 feature.bin）
+#   - OAF 应用识别: 先删掉源码/feeds 里自带的 OpenAppFilter，再重新 clone
+#                  destan19/OpenAppFilter 最新版（kmod-oaf + appfilter + luci-app-oaf）
 #   - UPnP: miniupnpd-nftables + luci-app-upnp
-#   - mosdns v5: feeds 的 mosdns 5.3.x + sbwml luci-app-mosdns + geo2txt + v2ray geo 数据
+#   - mosdns v5: sbwml/luci-app-mosdns v5 整仓（本体 5.3.x + LuCI + geo2txt）+ sbwml v2ray-geodata，
+#                Go 工具链同步换成 sbwml/packages_lang_golang 27.x（Go 1.27.3）
 #   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
 #   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
 #
@@ -153,14 +154,22 @@ jobs:
           if grep -qE "^$1=[ym]$" .config; then echo "✅ $1";
           else echo "❌ 缺少 $1"; ok=0; fi
         }
-        echo "----- PON 驱动栈 -----"
-        need CONFIG_PACKAGE_kmod-airoha-xpon
-        need CONFIG_PACKAGE_kmod-airoha-pon-frontend
-        need CONFIG_PACKAGE_kmod-airoha-en7572
-        need CONFIG_PACKAGE_airoha-pond
-        need CONFIG_PACKAGE_airoha-ponctl
-        echo "----- 2.5G 网口 PHY (lan1 2500base-x) -----"
-        need CONFIG_PACKAGE_kmod-phy-airoha-en8811h
+        # 必须编进内核镜像(=y)，不能是 =m 外挂模块
+        needy() {
+          if grep -qE "^$1=y$" .config; then echo "✅ $1=y";
+          else
+            echo "❌ $1 不是 =y（当前: $(grep -E "^$1=" .config || echo '未出现')）"; ok=0
+          fi
+        }
+        echo "----- PON 驱动栈 / 光模块驱动（强制 =y）-----"
+        needy CONFIG_PACKAGE_kmod-airoha-xpon
+        needy CONFIG_PACKAGE_kmod-airoha-pon-frontend
+        needy CONFIG_PACKAGE_kmod-airoha-en7572
+        needy CONFIG_PACKAGE_airoha-pond
+        needy CONFIG_PACKAGE_airoha-ponctl
+        echo "----- 2.5G 网口 PHY EN8811H（强制 =y）-----"
+        needy CONFIG_PACKAGE_kmod-phy-airoha-en8811h
+        needy CONFIG_PACKAGE_airoha-en8811h-firmware
         echo "----- 硬件加速 (L2 桥接 / L3) -----"
         need CONFIG_PACKAGE_kmod-nf-conntrack-bridge
         if grep -qE '^CONFIG_PACKAGE_kmod-nft-offload=[ym]$' .config; then
@@ -186,12 +195,25 @@ jobs:
         echo "----- UPnP -----"
         need CONFIG_PACKAGE_luci-app-upnp
         need CONFIG_PACKAGE_miniupnpd-nftables
-        echo "----- mosdns v5 -----"
+        echo "----- mosdns v5 / Go 工具链 -----"
         need CONFIG_PACKAGE_mosdns
         need CONFIG_PACKAGE_luci-app-mosdns
         need CONFIG_PACKAGE_geo2txt
         need CONFIG_PACKAGE_v2ray-geoip
         need CONFIG_PACKAGE_v2ray-geosite
+        if [ -f feeds/packages/lang/golang/Makefile ]; then
+          echo "✅ Go: $(grep -m1 '^PKG_VERSION' feeds/packages/lang/golang/Makefile)"
+          if grep -qE '^(mosdns|PKG_VERSION):=5\.' package/mosdns/mosdns/Makefile 2>/dev/null; then
+            echo "✅ mosdns: $(grep -m1 '^PKG_VERSION' package/mosdns/mosdns/Makefile)"
+          else
+            echo "❌ package/mosdns/mosdns 不是 v5 分支产物"; ok=0
+          fi
+        else
+          echo "❌ feeds/packages/lang/golang 缺失"; ok=0
+        fi
+        echo "----- OAF 版本（应是重新拉取的上游最新）-----"
+        echo "    appfilter: $(grep -m1 '^PKG_VERSION' package/open-app-filter/Makefile 2>/dev/null || echo '缺失')"
+        echo "    luci-app-oaf: $(grep -m1 '^PKG_VERSION' package/luci-app-oaf/Makefile 2>/dev/null || echo '缺失')"
         echo "----- files/ 叠加层 -----"
         for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi

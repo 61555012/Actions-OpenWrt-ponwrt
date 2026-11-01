@@ -25,11 +25,12 @@ files/                                  # 原样合并进固件根目录
 | 目标 | `airoha/an7581` → `nokia_xg-040g-md-ubi`，产物 `sysupgrade.itb` |
 | 硬件加速 | fw4 生成 `inet` + `bridge` 两张 flowtable，L3 与 **L2 桥接**都下到 Airoha PPE；默认 `flow_offloading=1` |
 | 每流统计 | `CONFIG_NET_AIROHA_FLOW_STATS=y`（即 `airoha_ppe_foe_flow_stats_*` / `FLOW_CLS_STATS`），编译后会复查生成的内核 `.config` |
-| PON | `kmod-airoha-xpon` + `kmod-airoha-pon-frontend` + `kmod-airoha-en7572`（EN7572 光前端）+ `airoha-pond` / `airoha-ponctl` |
-| 2.5G 网口 | `kmod-phy-airoha-en8811h`（lan1，`2500base-x` 链路） |
-| OAF | `kmod-oaf` + `appfilter` + `luci-app-oaf`（[destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) master，当前 7.0.2） |
+| PON / 光模块 | `kmod-airoha-xpon` + `kmod-airoha-pon-frontend` + `kmod-airoha-en7572`（EN7572 光前端）+ `airoha-pond` / `airoha-ponctl`，**全部强制 `=y`** |
+| 2.5G 网口 | `kmod-phy-airoha-en8811h` + `airoha-en8811h-firmware`，**强制 `=y`**（lan1，`2500base-x` 链路） |
+| OAF | 先删除源码/feeds 里自带的 OpenAppFilter，再重新 clone [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) master（当前 7.0.2） |
 | UPnP | `miniupnpd-nftables` + `luci-app-upnp`（fw4 是 nftables，必须 nftables 变体） |
-| mosdns | `mosdns` 5.3.x（feeds，v5）+ `luci-app-mosdns` / `geo2txt`（[sbwml](https://github.com/sbwml/luci-app-mosdns)）+ `v2ray-geoip` / `v2ray-geosite` |
+| mosdns | [sbwml/luci-app-mosdns](https://github.com/sbwml/luci-app-mosdns) `v5` 整仓（本体 5.3.4 + LuCI + `geo2txt`）+ [sbwml/v2ray-geodata](https://github.com/sbwml/v2ray-geodata) |
+| Go 工具链 | 换成 [sbwml/packages_lang_golang](https://github.com/sbwml/packages_lang_golang) `27.x`（Go 1.27.3），失败按 26.x→25.x 回退 |
 | 其他插件 | `luci-app-onu` + `luci-app-pon-status`（[naoki66/OpenWrt_ONU_CONFIG](https://github.com/naoki66/OpenWrt_ONU_CONFIG)）、`luci-app-airoha-npu`（[luanmuc](https://github.com/luanmuc/luci-app-airoha-npu)）、`argon v3.1.1` |
 | 去除项 | dummy 接口（`kmod-dummy` 不选 + 构建期删 base-files 模板 + 首启 uci 清理） |
 
@@ -67,9 +68,24 @@ uci set firewall.@defaults[0].flow_offloading_hw='0'
 uci commit firewall && /etc/init.d/firewall reload
 ```
 
-### 5. OAF 从哪来
+### 5. OAF 为什么要“先删再拉”
 
-PonWrt 的 feeds 里**没有** OAF（`feeds.conf.default` 只有 packages/luci/routing/telephony/video/pon_drivers/pon_userspace），`configs/an7581.config` 里那三行 `CONFIG_PACKAGE_kmod-oaf/appfilter/luci-app-appfilter` 是历史残留、选中也不会生效。所以 `diy-part2.sh` 直接拉 [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) 的 master，把 `oaf/`、`open-app-filter/`、`luci-app-oaf/` 三个目录放进 `package/`。kmod 是内核模块，跟着本树 6.18 一起编，vermagic 自动对得上，不会出现外挂 ipk 那种内核 panic。
+PonWrt 主树本身不含 OAF（`feeds.conf.default` 只有 packages/luci/routing/telephony/video/pon_drivers/pon_userspace），`configs/an7581.config` 里那三行 `CONFIG_PACKAGE_kmod-oaf/appfilter/luci-app-appfilter` 是历史残留。但 feeds 或旧分支可能带一份旧版 OpenAppFilter，**用户态 `appfilter` 与 `kmod-oaf` 版本不匹配会直接 insmod 失败**。所以 `diy-part2.sh` 按 S20P 的做法：
+
+```sh
+# 先删
+find package feeds -maxdepth 5 \( -name OpenAppFilter -o -name open-app-filter -o -name luci-app-oaf -o -name oaf \) -exec rm -rf {} +
+rm -rf package/feeds/*/luci-app-oaf
+# 再拉最新
+git clone --depth 1 https://github.com/destan19/OpenAppFilter.git /tmp/oafsrc
+cp -a /tmp/oafsrc/{oaf,open-app-filter,luci-app-oaf} package/
+```
+
+kmod 是内核模块，跟着本树 6.18 一起编，vermagic 自动对得上，不会出现外挂 ipk 那种内核 panic。
+
+### 5.1 mosdns 为什么要换 Go
+
+`mosdns` 5.3.x 需要较新的 Go，而 immortalwrt/packages 里的 `lang/golang` 版本偏旧。`diy-part2.sh` 在 `feeds update` 之后把 `feeds/packages/lang/golang` 整个换成 [sbwml/packages_lang_golang](https://github.com/sbwml/packages_lang_golang)：默认 `27.x`（Go 1.27.3），拉取失败自动回退 `26.x` → `25.x`。同时删掉源码树自带的 `net/mosdns`、`net/v2ray-geodata`（包名与 sbwml 版本重名会导致 duplicate package），改用 `sbwml/luci-app-mosdns v5` 整仓 + `sbwml/v2ray-geodata`；`diy-part3.sh` 会再清一遍 `package/feeds` 下的悬空链接和同名残留。
 
 ### 6. argon 为什么要单独一个 diy-part3
 
