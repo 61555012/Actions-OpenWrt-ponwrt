@@ -57,11 +57,14 @@ CONFIG_PACKAGE_airoha-en8811h-firmware=y
 #
 # ---------- 硬件加速: L2 桥接 + L3 路由 ----------
 # LEDE 的 an7581 DEFAULT_PACKAGES 不含这些，全部显式选。
+# 注意: LEDE 没有 kmod-nf-conntrack-bridge 这个包，
+#       CONFIG_BRIDGE_NETFILTER / CONFIG_NF_CONNTRACK_BRIDGE 由 diy-lede-lite-2.sh
+#       直接写进 target/linux/airoha/an7581/config-6.18 编成 =y。
 #
-CONFIG_PACKAGE_kmod-nf-conntrack-bridge=y
 CONFIG_PACKAGE_kmod-nft-offload=y
 CONFIG_PACKAGE_kmod-nf-flow=y
 CONFIG_PACKAGE_kmod-nft-bridge=y
+CONFIG_PACKAGE_kmod-nf-conntrack=y
 
 #
 # NOTE: 每流字节统计由内核符号控制 —— 见 diy-lede-lite-2.sh

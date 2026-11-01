@@ -171,6 +171,7 @@ feeds（immortalwrt/luci）里自带同名 `luci-theme-argon`。如果在 `feeds
 | PON feeds | 替换 `pon_userspace` 源 + 保留下游 `pon_drivers` | 两者都是**追加**（LEDE 原本没有） |
 | 设备符号 | `CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi`（MULTI_PROFILE） | `CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi`（单 profile，工作流会兜底两种写法） |
 | 内核 | 6.18（ponwrt 自带 patch 集） | 6.18（LEDE 自带 patch 集，`# CONFIG_NET_AIROHA_FLOW_STATS is not set` 同样存在） |
+| L2 桥接前置 | 选包 `kmod-nf-conntrack-bridge` | LEDE 没有这个包，改为把 `CONFIG_BRIDGE_NETFILTER` / `CONFIG_NF_CONNTRACK_BRIDGE` 直接写成 `=y` 编进内核（`generic/config-6.18` 里默认是 not set） |
 | 工具链缓存 | 与标准版共用 `toolchain-airoha-an7581-*` | 独立 `toolchain-lede-an7581-*`（tools/toolchain 与 PonWrt 不同，不能混用） |
 
 两条 PonWrt 流水线共用同一个 `toolchain-cache` Release 与同一把缓存键，先进先得：标准版编过一次，纯净版就直接复用工具链，反之亦然。为此两边都设了 `concurrency: ponwrt-toolchain-cache` 串行；LEDE 用自己的一组 `lede-toolchain-cache`。

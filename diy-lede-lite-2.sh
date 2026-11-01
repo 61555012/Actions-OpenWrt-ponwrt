@@ -46,12 +46,30 @@ fi
 
 ########################################
 # 2) L2 桥接卸载前置
+#    PonWrt/immortalwrt 里有 kmod-nf-conntrack-bridge 这个包；
+#    LEDE 没有打包（package/kernel/linux/modules/netfilter.mk 里没有），
+#    generic config-6.18 里还是 "is not set"。
+#    所以直接把这几个内核符号写成 =y，编进内核镜像：
+#      CONFIG_BRIDGE_NETFILTER     —— bridge 上跑 netfilter 的钩子
+#      CONFIG_NF_CONNTRACK_BRIDGE  —— bridge family flowtable 生成硬件条目的前提
+#      否则 fw4 的 bridge flowtable 只有软件路径，PPE 收不到 L2 流。
 ########################################
+echo "==== [diy-lede-lite-p2] 打开 bridge conntrack（LEDE 无对应 kmod 包）===="
+for sym in CONFIG_BRIDGE_NETFILTER CONFIG_NF_CONNTRACK_BRIDGE; do
+  sed -i "s/^# ${sym} is not set$/${sym}=y/" "$KC"
+  grep -q "^${sym}=" "$KC" || echo "${sym}=y" >> "$KC"
+  if grep -q "^${sym}=y" "$KC"; then
+    echo "    ✅ ${sym}=y"
+  else
+    echo "    ❌ ${sym} 未能置为 =y"; exit 1
+  fi
+done
+
 echo "==== [diy-lede-lite-p2] 检查 kmod-nf-conntrack-bridge ===="
-if grep -q 'kmod-nf-conntrack-bridge' target/linux/airoha/an7581/target.mk 2>/dev/null; then
-  echo "    ✅ target.mk 已含 kmod-nf-conntrack-bridge"
+if grep -q 'KernelPackage/nf-conntrack-bridge' package/kernel/linux/modules/netfilter.mk 2>/dev/null; then
+  echo "    ℹ️  LEDE 已有 kmod-nf-conntrack-bridge 包，.config 里也可选它"
 else
-  echo "    ⚠️  LEDE 默认包未含 kmod-nf-conntrack-bridge，由 .config-lede-lite 显式选中"
+  echo "    ℹ️  LEDE 无 kmod-nf-conntrack-bridge 包，已用内核 =y 方式替代（见上）"
 fi
 
 ########################################

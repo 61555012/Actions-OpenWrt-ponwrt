@@ -165,9 +165,16 @@ jobs:
         needy CONFIG_PACKAGE_kmod-phy-airoha-en8811h
         needy CONFIG_PACKAGE_airoha-en8811h-firmware
         echo "----- 硬件加速 (L2 桥接 / L3) -----"
-        need CONFIG_PACKAGE_kmod-nf-conntrack-bridge
         need CONFIG_PACKAGE_kmod-nft-offload
         need CONFIG_PACKAGE_kmod-nf-flow
+        need CONFIG_PACKAGE_kmod-nft-bridge
+        for sym in CONFIG_BRIDGE_NETFILTER CONFIG_NF_CONNTRACK_BRIDGE; do
+          if grep -qE "^${sym}=y" target/linux/airoha/an7581/config-6.18; then
+            echo "✅ ${sym}=y (LEDE 无 kmod 包，走内核内置)"
+          else
+            echo "❌ ${sym} 未在 config-6.18 中打开（bridge flowtable 无法生成硬件条目）"; ok=0
+          fi
+        done
         echo "----- 内核开关: 每流统计 -----"
         if grep -qE '^CONFIG_NET_AIROHA_FLOW_STATS=y' target/linux/airoha/an7581/config-6.18; then
           echo "✅ CONFIG_NET_AIROHA_FLOW_STATS=y (config-6.18 已改写)"
@@ -360,7 +367,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -369,7 +376,7 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=${DEVICE_NAME}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
@@ -414,7 +421,7 @@ jobs:
 
     - name: Remove old releases
       uses: dev-drprasad/delete-older-releases@v0.3.4
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       with:
         keep_latest: 5
         delete_tags: true
