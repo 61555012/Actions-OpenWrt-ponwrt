@@ -27,6 +27,83 @@ else
 fi
 
 ########################################
+# 0) 裁剪 LEDE router 默认包 —— 只留拨号 + 基础路由
+#
+#    LEDE(coolsnowwolf) 的 include/target.mk 里 DEFAULT_PACKAGES.router 自带一堆
+#    lean 插件，默认会全部编进固件（这就是之前固件里出现 ssr-plus 等的原因）:
+#      luci-app-ssr-plus / luci-app-upnp / luci-app-turboacc / luci-app-ddns /
+#      luci-app-vsftpd / luci-app-filetransfer / luci-app-vlmcsd / luci-app-wol /
+#      luci-app-arpbind / luci-app-accesscontrol / luci-app-nlbwmon / luci-app-autoreboot /
+#      ddns-scripts_aliyun / ddns-scripts_dnspod / coremark /
+#      kmod-tun / kmod-ipt-raw / iptables-mod-tproxy / kmod-sched-bpf /
+#      kmod-xdp-sockets-diag
+#    这些不是 .config 里 "is not set" 就能可靠挡住的（默认 y 由默认包清单注入），
+#    所以直接在源码层把这份清单换成白名单，再让 make defconfig 按白名单走。
+########################################
+echo "==== [diy-lede-lite-p2] 裁剪 LEDE router 默认包（只留拨号 + 基础路由）===="
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "    ❌ 需要 python3 才能裁剪 include/target.mk"; exit 1
+fi
+python3 - <<'PY'
+import re, sys, pathlib
+
+TARGET_MK = pathlib.Path('include/target.mk')
+if not TARGET_MK.is_file():
+    print('    ❌ 未找到 include/target.mk'); sys.exit(1)
+
+# 白名单：拨号(PPPoE) + DHCP/DNS + IPv6 + 基础路由 + 防火墙 + LuCI
+KEEP = """
+dnsmasq-full firewall4 nftables-json iptables ip6tables libip6tc kmod-ipt-nat6
+ppp ppp-mod-pppoe odhcp6c odhcpd-ipv6only
+ip-full ipset block-mount kmod-nf-nathelper kmod-nf-nathelper-extra iptables-mod-extra
+default-settings luci luci-proto-ipv6 luci-proto-ppp
+curl ca-certificates kmod-sched-core kmod-veth
+""".split()
+
+# 必须从默认包里消失的（第三方插件 / 代理专用）
+BAN = """
+luci-app-ssr-plus luci-app-passwall luci-app-passwall2 luci-app-openclash
+luci-app-bypass luci-app-vssr luci-app-upnp luci-app-turboacc luci-app-ddns
+luci-app-vsftpd luci-app-filetransfer luci-app-vlmcsd luci-app-wol
+luci-app-arpbind luci-app-accesscontrol luci-app-nlbwmon luci-app-autoreboot
+ddns-scripts_aliyun ddns-scripts_dnspod coremark
+kmod-tun kmod-ipt-raw iptables-mod-tproxy kmod-sched-bpf kmod-xdp-sockets-diag
+""".split()
+
+src = TARGET_MK.read_text()
+m = re.search(r'^DEFAULT_PACKAGES\.router:=\\\n(?:.*\\\n)*[^\\\n]*\n', src, re.M)
+if not m:
+    print('    ❌ 未能在 include/target.mk 中定位 DEFAULT_PACKAGES.router 块'); sys.exit(1)
+
+block = m.group(0)
+old = [t for t in block[len('DEFAULT_PACKAGES.router:='):].replace('\\', ' ').split()]
+removed = [t for t in old if t not in KEEP]
+added = [t for t in KEEP if t not in old]
+
+lines = ['DEFAULT_PACKAGES.router:=\\']
+per_line = 6
+for i in range(0, len(KEEP), per_line):
+    chunk = ' '.join(KEEP[i:i + per_line])
+    lines.append('\t' + chunk + (' \\' if i + per_line < len(KEEP) else ''))
+new_block = '\n'.join(lines) + '\n'
+
+pathlib.Path('include/target.mk.bak.plugins').write_text(src)
+TARGET_MK.write_text(src.replace(block, new_block, 1))
+
+print('    已剔除 %d 项: %s' % (len(removed), ' '.join(removed)))
+if added:
+    print('    已补入 %d 项: %s' % (len(added), ' '.join(added)))
+print('    新 DEFAULT_PACKAGES.router:')
+for ln in new_block.strip().split('\n'):
+    print('       ' + ln)
+
+left = [b for b in BAN if re.search(r'(?<![\w.-])%s(?![\w.-])' % re.escape(b), TARGET_MK.read_text())]
+if left:
+    print('    ❌ 仍残留: %s' % ' '.join(left)); sys.exit(1)
+print('    ✅ include/target.mk 默认包已白名单化，无第三方插件')
+PY
+
+########################################
 # 1) 内核: 每流流量统计（硬件加速的计数来源）
 ########################################
 echo "==== [diy-lede-lite-p2] 打开 CONFIG_NET_AIROHA_FLOW_STATS ===="
