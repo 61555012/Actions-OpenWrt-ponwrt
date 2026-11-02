@@ -127,19 +127,25 @@ jobs:
         #
         # 统一以 LEDE 自带 packages/pon 为准, pon_userspace 只保留 luci-app-onu 与
         # luci-app-pon-status 这两个 packages 里没有的包。
-        BASE=package/feeds/packages/pon
+        # 注意: scripts/feeds install 会把 feed 内的目录层级「展平」,
+        # feeds/packages/pon/airoha-ponctl 装成 package/feeds/packages/airoha-ponctl,
+        # 所以基准目录是 package/feeds/packages, 不是 package/feeds/packages/pon。
+        BASE=package/feeds/packages
         if [ ! -d "$BASE" ]; then
-          echo "::warning::没有 $BASE, 跳过去重"
-          exit 0
+          echo "::error::没有 $BASE, feeds install 可能没跑"
+          exit 1
         fi
+        PON_PKGS="airoha-pon-daemons airoha-pon-debug airoha-pon-frontends airoha-ponctl airoha-xpon luci-app-pon luci-app-iptv"
         echo "===== 去重前 ====="
         for f in packages pon_drivers pon_userspace; do
           [ -d "package/feeds/$f" ] && { echo "  [$f]"; ls -1 "package/feeds/$f" 2>/dev/null | sed 's/^/    /'; }
         done
         removed=0
-        for d in "$BASE"/*; do
-          [ -e "$d" ] || continue
-          p=$(basename "$d")
+        for p in $PON_PKGS; do
+          if [ ! -e "$BASE/$p" ]; then
+            echo "  ⚠️  LEDE packages 里没有 $p, 跳过"
+            continue
+          fi
           for other in "package/feeds/pon_drivers/$p" "package/feeds/pon_userspace/$p"; do
             if [ -e "$other" ]; then
               echo "  去掉重复: $p  ($other, 保留 $BASE/$p)"
@@ -163,9 +169,13 @@ jobs:
           fi
         done
         echo "✅ pon 相关包名已唯一"
-        # 关键包必须落在 packages/pon 下
+        # 关键包必须落在 LEDE packages 下
         for p in airoha-pon-daemons airoha-ponctl airoha-xpon; do
-          [ -e "$BASE/$p" ] || { echo "::error::LEDE packages/pon 缺少 $p"; exit 1; }
+          [ -e "$BASE/$p" ] || { echo "::error::LEDE packages 缺少 $p"; exit 1; }
+        done
+        # luci-app-onu / luci-app-pon-status 必须还在 pon_userspace 下 (packages 里没有)
+        for p in luci-app-onu luci-app-pon-status; do
+          [ -e "package/feeds/pon_userspace/$p" ] || { echo "::error::pon_userspace 缺少 $p"; exit 1; }
         done
         echo "✅ airoha-pon-daemons / airoha-ponctl / airoha-xpon 均来自 LEDE packages"
 
@@ -188,15 +198,16 @@ jobs:
         grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE)=|^CONFIG_TARGET_airoha' .config | head -10
         grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
         # ---- ccache: 编译器对象缓存, 跨构建复用已编译的 .o ----
+        # LEDE 的 Config.in / Config-build.in 里都没有 "config CCACHE" 这个符号
+        # (实测两轮都是 warning), 探测式永远开不起来。rules.mk 判的是 make 变量
+        # CONFIG_CCACHE, 所以直接写进 .config 即可 —— 但不能紧跟着 make defconfig,
+        # kconfig 认不得这个符号, 会把它从 .config 里清掉。
+        # 可用性由后面的 Handle toolchain 负责校验: host ccache 起不来就删掉这行并回退。
         if ! grep -q '^CONFIG_CCACHE=y' .config; then
-          # LEDE 的 ccache 符号在顶层 Config.in, 不在 Config-build.in
-          if grep -qE '^[[:space:]]*config[[:space:]]+CCACHE$' Config.in Config-build.in 2>/dev/null; then
-            echo 'CONFIG_CCACHE=y' >> .config
-            make defconfig
-          fi
+          echo 'CONFIG_CCACHE=y' >> .config
         fi
         if grep -q '^CONFIG_CCACHE=y' .config; then
-          echo "✅ CONFIG_CCACHE 已启用（host ccache 在工具链阶段校验）"
+          echo "✅ CONFIG_CCACHE 已写入 .config（host ccache 在工具链阶段校验）"
         else
           echo "::warning::CONFIG_CCACHE 未生效，本次不使用 ccache（不影响构建）"
         fi
