@@ -237,6 +237,28 @@ jobs:
         fi
         echo "   默认包清单:"
         sed -n '/^DEFAULT_PACKAGES\.router:=/,/[^\\]$/p' include/target.mk | tr -s ' \t' ' ' | sed 's/^/     /'
+        echo "----- feed 依赖：不得指向 LEDE 不存在的 kmod -----"
+        # run #3 就是死在这里：luci-app-onu 的 LUCI_DEPENDS 带 +kmod-nf-conntrack-bridge，
+        # 而 LEDE 的 package/kernel/linux/modules/netfilter.mk 里没有这个 KernelPackage，
+        # 元数据阶段只给一条 WARNING，真正炸在 make package/install。
+        # diy-lede-lite-2.sh 会在 feeds install 之前把这类依赖剔掉，这里再兜底扫一遍。
+        KMODS=$(grep -rhoE 'define[[:space:]]+KernelPackage/[A-Za-z0-9._-]+' package target/linux feeds 2>/dev/null \
+                | sed 's|.*KernelPackage/|kmod-|' | sort -u) || true
+        echo "   LEDE 可用的 kmod 包: $(printf '%s\n' "$KMODS" | grep -c . ) 个"
+        miss=0
+        for mk in package/feeds/pon_*/*/Makefile; do
+          [ -f "$mk" ] || continue
+          for k in $(grep -oE '\+kmod-[A-Za-z0-9._-]+' "$mk" | tr -d '+' | sort -u || true); do
+            if ! printf '%s\n' "$KMODS" | grep -qx -- "$k"; then
+              echo "❌ $mk 依赖不存在的 $k"; miss=1
+            fi
+          done
+        done
+        if [ "$miss" = "1" ]; then
+          ok=0
+        else
+          echo "✅ PON feed 的 kmod 依赖全部可满足"
+        fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
           echo "❌ kmod-dummy 仍被选中"; ok=0
