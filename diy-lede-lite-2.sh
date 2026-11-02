@@ -237,6 +237,14 @@ then
 fi
 rm -f "$KNOWN_KMODS"
 
+# 上面改的是 feeds/<feed>/ 下的源文件, 但 feed index 是 feeds update 时生成的,
+# 里面还留着旧的依赖清单。feeds install 读的是 index, 会按旧依赖去算闭包
+# (run 41397279819 里 install 阶段仍打出 "No feed for package 'kmod-nf-conntrack-bridge'")。
+# 删掉这两个 index, 让 scripts/feeds install 重新扫描 Makefile。
+for idx in feeds/pon_userspace.index feeds/pon_drivers.index; do
+  [ -f "$idx" ] && { rm -f "$idx"; echo "    已清理过期索引: $idx"; }
+done
+
 ########################################
 # 3) 去除 dummy 接口
 ########################################
