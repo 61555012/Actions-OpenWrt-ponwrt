@@ -142,12 +142,100 @@ for sym in CONFIG_BRIDGE_NETFILTER CONFIG_NF_CONNTRACK_BRIDGE; do
   fi
 done
 
-echo "==== [diy-lede-lite-p2] 检查 kmod-nf-conntrack-bridge ===="
-if grep -q 'KernelPackage/nf-conntrack-bridge' package/kernel/linux/modules/netfilter.mk 2>/dev/null; then
-  echo "    ℹ️  LEDE 已有 kmod-nf-conntrack-bridge 包，.config 里也可选它"
-else
-  echo "    ℹ️  LEDE 无 kmod-nf-conntrack-bridge 包，已用内核 =y 方式替代（见上）"
+########################################
+# 2b) 剔除 feed 里指向「LEDE 不存在的 kmod」的依赖
+#
+#     run #3 的真实失败点就在这里:
+#       WARNING: Makefile 'package/feeds/pon_userspace/luci-app-onu/Makefile'
+#                has a dependency on 'kmod-nf-conntrack-bridge', which does not exist
+#       紧跟着 make[2] package/install 直接失败（-j1 重试同样失败）。
+#
+#     luci-app-onu 来自 naoki66/OpenWrt_ONU_CONFIG，原本面向 ImmortalWrt/PonWrt，
+#     那两个树里有 kmod-nf-conntrack-bridge 包；LEDE 的 netfilter.mk 里没有这个
+#     KernelPackage，generic config-6.18 也是 "# CONFIG_NF_CONNTRACK_BRIDGE is not set"。
+#     上面的步骤已经把该功能以 =y 编进内核镜像，内核里有了，
+#     所以只需把这根指向"不存在的包"的硬依赖从 feed 的 Makefile 里去掉，功能不缺。
+#
+#     时机: 本脚本跑在 feeds update 之后、feeds install 之前，
+#           改 feeds/<feed>/ 里的源文件即可；install 建的是符号链接，改一处即生效。
+########################################
+echo "==== [diy-lede-lite-p2] 剔除 feed 里指向不存在 kmod 的依赖 ===="
+KNOWN_KMODS=".known_kmods.$$"   # 用相对路径，避免 mktemp 在部分环境下返回带盘符的路径
+# LEDE 树里所有 KernelPackage 的名字（含 feeds 提供的，如 kmod-airoha-xpon）
+grep -rhoE 'define[[:space:]]+KernelPackage/[A-Za-z0-9._-]+' \
+     package target/linux feeds 2>/dev/null \
+     | sed 's|.*KernelPackage/|kmod-|' | sort -u > "$KNOWN_KMODS"
+echo "    LEDE 可用的 kmod 包: $(wc -l < "$KNOWN_KMODS") 个"
+
+if ! KNOWN_KMODS_FILE="$KNOWN_KMODS" python3 - <<'PY'
+import glob, os, re, sys
+
+known_file = os.environ['KNOWN_KMODS_FILE']
+known = set(x for x in open(known_file, encoding='utf-8').read().split() if x)
+
+# 只动 PON 相关 feed，LEDE 自带 feed 的依赖是自洽的，不去碰
+targets = sorted(set(glob.glob('feeds/pon_*/*/Makefile') +
+                     glob.glob('package/feeds/pon_*/*/Makefile')))
+if not targets:
+    print('    ⚠️  没找到 pon_* feed 的 Makefile（feeds update 可能没跑？）')
+
+DEP_BLOCK = re.compile(r'(?m)^(?:LUCI_)?DEPENDS\s*[:+]?=(?:[^\n]*\\\n)*[^\n]*')
+TOKEN = re.compile(r'\+([A-Za-z0-9._\-]+)')
+
+dropped = []
+for path in targets:
+    with open(path, encoding='utf-8', errors='replace') as f:
+        text = f.read()
+
+    hits = []
+
+    def fix_block(m):
+        seg = m.group(0)
+
+        def keep(mm):
+            name = mm.group(1)
+            if name.startswith('kmod-') and name not in known:
+                hits.append(name)
+                return ''
+            return mm.group(0)
+
+        seg = TOKEN.sub(keep, seg)
+        seg = re.sub(r'[ ]{2,}', ' ', seg)          # 收拾删掉 token 留下的双空格
+        seg = re.sub(r'[ \t]+\\$', ' \\\\', seg)    # 保持续行符前恰好一个空格
+        return seg
+
+    new = DEP_BLOCK.sub(fix_block, text)
+    if hits:
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(new)
+        dropped.append((path, sorted(set(hits))))
+        print(f'    ✅ {path}')
+        print(f'       去掉: {" ".join(sorted(set(hits)))}')
+
+if not dropped:
+    print('    ℹ️  pon_* feed 里没有引用 LEDE 缺失的 kmod，无需改动')
+
+# 兜底断言：改完再扫一遍，不能还有缺失项
+bad = []
+for path in targets:
+    with open(path, encoding='utf-8', errors='replace') as f:
+        text = f.read()
+    for m in DEP_BLOCK.finditer(text):
+        for d in TOKEN.findall(m.group(0)):
+            if d.startswith('kmod-') and d not in known:
+                bad.append((path, d))
+if bad:
+    for p, d in bad:
+        print(f'    ❌ 仍存在缺失依赖: {p} -> {d}')
+    sys.exit(1)
+print('    ✅ 依赖校验通过（不存在指向 LEDE 缺失 kmod 的依赖）')
+PY
+then
+  echo "❌ [diy-lede-lite-p2] feed 依赖清理/校验失败"
+  rm -f "$KNOWN_KMODS"
+  exit 1
 fi
+rm -f "$KNOWN_KMODS"
 
 ########################################
 # 3) 去除 dummy 接口
