@@ -207,15 +207,22 @@ jobs:
         need CONFIG_PACKAGE_geo2txt
         need CONFIG_PACKAGE_v2ray-geoip
         need CONFIG_PACKAGE_v2ray-geosite
-        if [ -f feeds/packages/lang/golang/Makefile ]; then
-          echo "✅ Go: $(grep -m1 '^PKG_VERSION' feeds/packages/lang/golang/Makefile)"
+        # golang 包的 Makefile 有两种布局, 都要认:
+        #   上游 packages: lang/golang/Makefile
+        #   sbwml 27.x:    lang/golang/golang/Makefile  (仓库根放 *.mk, 包在 golang/ 子目录)
+        GO_MK=""
+        for c in feeds/packages/lang/golang/golang/Makefile feeds/packages/lang/golang/Makefile; do
+          if [ -f "$c" ]; then GO_MK="$c"; break; fi
+        done
+        if [ -n "$GO_MK" ]; then
+          echo "✅ Go: $(grep -m1 '^PKG_VERSION' "$GO_MK")  [$GO_MK]"
           if grep -qE '^(mosdns|PKG_VERSION):=5\.' package/mosdns/mosdns/Makefile 2>/dev/null; then
             echo "✅ mosdns: $(grep -m1 '^PKG_VERSION' package/mosdns/mosdns/Makefile)"
           else
             echo "❌ package/mosdns/mosdns 不是 v5 分支产物"; ok=0
           fi
         else
-          echo "❌ feeds/packages/lang/golang 缺失"; ok=0
+          echo "❌ golang 包 Makefile 缺失 (已查 lang/golang/golang 与 lang/golang 两种布局)"; ok=0
         fi
         echo "----- OAF 版本（应是重新拉取的上游最新）-----"
         echo "    appfilter: $(grep -m1 '^PKG_VERSION' package/open-app-filter/Makefile 2>/dev/null || echo '缺失')"
