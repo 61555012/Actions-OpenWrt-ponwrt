@@ -478,15 +478,22 @@ jobs:
             df -hT /
             exit 1
           fi
-          echo "::warning::首次编译失败 (非磁盘原因), 降为单线程重试"
+          # -j 的 trace 输出会把真正的错误行淹没甚至丢失 (本次 run 41382279829 就是
+          # 卡在 package/install 却一行错误都没有), 必须用 -j1 V=s 重跑才能拿到原因
+          echo "::warning::首次编译失败 (非磁盘原因), 用 -j1 V=s 抓详细错误"
           set +e
-          make -j1 2>&1 | tee -a /tmp/build.log
-          rc=${PIPESTATUS[0]}
+          make -j1 V=s > /tmp/build2.log 2>&1
+          rc=$?
           set -e
         fi
         if [ "$rc" -ne 0 ]; then
-          echo "::error::编译失败, 末尾 80 行日志:"
-          tail -80 /tmp/build.log
+          echo "::error::编译失败"
+          echo "===== 关键错误行 ====="
+          grep -nE '(^|[[:space:]])(ERROR:|Error [0-9]+|error:|\*\*\* |No such file|Cannot |command not found)' /tmp/build2.log 2>/dev/null | tail -40 || true
+          echo "===== package/install 上下文 ====="
+          grep -n -A25 'package/install' /tmp/build2.log 2>/dev/null | tail -60 || true
+          echo "===== 末尾 120 行 ====="
+          tail -120 /tmp/build2.log 2>/dev/null || tail -120 /tmp/build.log
           exit 1
         fi
         echo "status=success" >> $GITHUB_OUTPUT
