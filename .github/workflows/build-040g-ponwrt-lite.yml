@@ -125,6 +125,18 @@ jobs:
         echo "===== 目标相关行 ====="
         grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE)=' .config
         grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
+        # ---- ccache: 编译器对象缓存, 跨构建复用已编译的 .o ----
+        if ! grep -q '^CONFIG_CCACHE=y' .config; then
+          if grep -qE '^[[:space:]]*config[[:space:]]+CCACHE$' Config-build.in 2>/dev/null; then
+            echo 'CONFIG_CCACHE=y' >> .config
+            make defconfig
+          fi
+        fi
+        if grep -q '^CONFIG_CCACHE=y' .config; then
+          echo "✅ CONFIG_CCACHE 已启用（host ccache 在工具链阶段校验）"
+        else
+          echo "::warning::CONFIG_CCACHE 未生效，本次不使用 ccache（不影响构建）"
+        fi
 
     - name: Verify target device
       run: |
@@ -238,6 +250,13 @@ jobs:
         echo "CACHE_KEY=toolchain-airoha-an7581-${TOOLS_HASH:0:16}" >> $GITHUB_OUTPUT
         echo "CACHE_PREFIX=toolchain-airoha-an7581" >> $GITHUB_OUTPUT
         echo "缓存键: toolchain-airoha-an7581-${TOOLS_HASH:0:16}"
+        # ---- 二次利用: dl 源码包 + ccache 的缓存键 ----
+        # dl 按月轮转 / ccache 按 ISO 周轮转: 同周期内精确命中即不重复保存,
+        # 避免每次构建都写一条新缓存把 10GB 配额挤爆、反过来淘汰工具链缓存。
+        echo "CACHE_TAG=airoha-an7581" >> $GITHUB_OUTPUT
+        echo "DL_KEY=dl-airoha-an7581-$(date -u +%Y%m)" >> $GITHUB_OUTPUT
+        echo "CC_KEY=ccache-airoha-an7581-$(date -u +%G-W%V)" >> $GITHUB_OUTPUT
+        echo "dl 键: dl-airoha-an7581-$(date -u +%Y%m)  ccache 键: ccache-airoha-an7581-$(date -u +%G-W%V)"
 
     - name: Restore toolchain (actions/cache)
       uses: actions/cache/restore@v4
@@ -299,6 +318,23 @@ jobs:
         fi
         sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
         echo "Makefile 已修改: 后续跳过工具链重编译"
+        # ---- ccache: 确保 host ccache 可用, 否则回退关闭, 避免编译期 command not found ----
+        if grep -q '^CONFIG_CCACHE=y' .config 2>/dev/null; then
+          if [ ! -x staging_dir/host/bin/ccache ]; then
+            echo "工具链缓存不含 host ccache, 补编..."
+            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+          fi
+          if [ -x staging_dir/host/bin/ccache ]; then
+            mkdir -p .ccache
+            staging_dir/host/bin/ccache --max-size=1G || true
+            staging_dir/host/bin/ccache --version | head -1
+          else
+            echo "::warning::host ccache 不可用, 回退关闭 CONFIG_CCACHE"
+            sed -i '/^CONFIG_CCACHE/d' .config
+            echo '# CONFIG_CCACHE is not set' >> .config
+            make defconfig
+          fi
+        fi
 
     - name: Save toolchain (actions/cache)
       uses: actions/cache/save@v4
@@ -332,6 +368,32 @@ jobs:
     - name: SSH connection to Actions
       uses: mxschmitt/action-tmate@v3
       if: github.event.inputs.ssh == 'true'
+
+    - name: Restore dl cache (源码包)
+      uses: actions/cache@v4
+      id: dl-cache
+      with:
+        path: /workdir/openwrt/dl
+        key: ${{ steps.cache-key.outputs.DL_KEY }}
+        restore-keys: |
+          dl-airoha-an7581-
+
+    - name: Restore ccache (编译对象缓存)
+      uses: actions/cache@v4
+      id: ccache-cache
+      with:
+        path: /workdir/openwrt/.ccache
+        key: ${{ steps.cache-key.outputs.CC_KEY }}
+        restore-keys: |
+          ccache-airoha-an7581-
+
+    - name: Report cache state
+      run: |
+        cd openwrt
+        echo "dl 命中: ${{ steps.dl-cache.outputs.cache-hit }} / ccache 命中: ${{ steps.ccache-cache.outputs.cache-hit }}"
+        du -sh dl 2>/dev/null || echo "dl 尚不存在"
+        du -sh .ccache 2>/dev/null || echo ".ccache 尚不存在"
+        df -hT / | tail -1
 
     - name: Download package
       run: |
