@@ -112,6 +112,63 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    - name: Dedupe duplicate PON packages
+      run: |
+        cd openwrt
+        # LEDE 自带的 packages feed 里已经有 pon 全套 (airoha-pon-daemons/airoha-ponctl/
+        # airoha-xpon/airoha-pon-frontends/luci-app-pon/luci-app-iptv), 而 diy part1 又追加了
+        # pon_drivers (pbs05) 与 pon_userspace (naoki66), 三份 feed 存在同名包。
+        #
+        # 后果: package/feeds 下同名目录并存 -> genpackageindex 只保留最后收集的一份,
+        # 而 make 编译的可能是另一份, ipk 与依赖清单对不上; 直接表现是
+        #   * opkg_install_cmd: Cannot install package luci-app-onu
+        # 因为它依赖的 airoha-pond / airoha-ponctl / kmod-airoha-xpon 根本没进安装列表
+        # (run 41397279819 就是这个现象: 编译全过, package/install 6 秒失败)。
+        #
+        # 统一以 LEDE 自带 packages/pon 为准, pon_userspace 只保留 luci-app-onu 与
+        # luci-app-pon-status 这两个 packages 里没有的包。
+        BASE=package/feeds/packages/pon
+        if [ ! -d "$BASE" ]; then
+          echo "::warning::没有 $BASE, 跳过去重"
+          exit 0
+        fi
+        echo "===== 去重前 ====="
+        for f in packages pon_drivers pon_userspace; do
+          [ -d "package/feeds/$f" ] && { echo "  [$f]"; ls -1 "package/feeds/$f" 2>/dev/null | sed 's/^/    /'; }
+        done
+        removed=0
+        for d in "$BASE"/*; do
+          [ -e "$d" ] || continue
+          p=$(basename "$d")
+          for other in "package/feeds/pon_drivers/$p" "package/feeds/pon_userspace/$p"; do
+            if [ -e "$other" ]; then
+              echo "  去掉重复: $p  ($other, 保留 $BASE/$p)"
+              rm -rf "$other"
+              removed=$((removed + 1))
+            fi
+          done
+        done
+        echo "  共去掉 $removed 个重复包"
+        echo "===== 去重后 pon 相关包 ====="
+        for f in packages pon_drivers pon_userspace; do
+          [ -d "package/feeds/$f" ] && { echo "  [$f]"; ls -1 "package/feeds/$f" 2>/dev/null | sed 's/^/    /'; }
+        done
+        # 断言: 这批包名在 package/feeds 下必须唯一
+        for p in airoha-pond airoha-ponctl airoha-pon-daemons airoha-pon-debug airoha-pon-frontends airoha-xpon luci-app-onu luci-app-pon luci-app-pon-status luci-app-iptv; do
+          n=$(find package/feeds -maxdepth 2 -mindepth 2 -name "$p" 2>/dev/null | wc -l)
+          if [ "$n" -gt 1 ]; then
+            echo "::error::包 $p 仍存在 $n 份:"
+            find package/feeds -maxdepth 2 -mindepth 2 -name "$p" | sed 's/^/    /'
+            exit 1
+          fi
+        done
+        echo "✅ pon 相关包名已唯一"
+        # 关键包必须落在 packages/pon 下
+        for p in airoha-pon-daemons airoha-ponctl airoha-xpon; do
+          [ -e "$BASE/$p" ] || { echo "::error::LEDE packages/pon 缺少 $p"; exit 1; }
+        done
+        echo "✅ airoha-pon-daemons / airoha-ponctl / airoha-xpon 均来自 LEDE packages"
+
     - name: Load custom configuration
       run: |
         cd openwrt
@@ -132,7 +189,8 @@ jobs:
         grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
         # ---- ccache: 编译器对象缓存, 跨构建复用已编译的 .o ----
         if ! grep -q '^CONFIG_CCACHE=y' .config; then
-          if grep -qE '^[[:space:]]*config[[:space:]]+CCACHE$' Config-build.in 2>/dev/null; then
+          # LEDE 的 ccache 符号在顶层 Config.in, 不在 Config-build.in
+          if grep -qE '^[[:space:]]*config[[:space:]]+CCACHE$' Config.in Config-build.in 2>/dev/null; then
             echo 'CONFIG_CCACHE=y' >> .config
             make defconfig
           fi
@@ -492,12 +550,31 @@ jobs:
           grep -nE '(^|[[:space:]])(ERROR:|Error [0-9]+|error:|\*\*\* |No such file|Cannot |command not found)' /tmp/build2.log 2>/dev/null | tail -40 || true
           echo "===== package/install 上下文 ====="
           grep -n -A25 'package/install' /tmp/build2.log 2>/dev/null | tail -60 || true
+          echo "===== opkg 安装错误上下文 ====="
+          grep -nE 'opkg|Installing |Cannot install|depends on|not available|unknown package|No feed for package|check_data_file_clashes' /tmp/build2.log 2>/dev/null | tail -60 || true
+          echo "===== package/install 起始行 ====="
+          grep -n 'package/install' /tmp/build2.log 2>/dev/null | head -3 || true
+          echo "===== PON/ONU 相关 ipk 产物 ====="
+          find bin/packages -name '*.ipk' 2>/dev/null | grep -Ei 'onu|airoha|/pon/' | sed 's|.*/||' | sort || true
+          echo "===== .config 中相关开关 ====="
+          grep -E '^CONFIG_PACKAGE_(airoha|luci-app-onu|luci-i18n-onu|ip-full|kmod-airoha)' .config 2>/dev/null || true
           echo "===== 末尾 120 行 ====="
           tail -120 /tmp/build2.log 2>/dev/null || tail -120 /tmp/build.log
           exit 1
         fi
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Upload build logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-lede-lite
+        path: |
+          /tmp/build.log
+          /tmp/build2.log
+        if-no-files-found: ignore
+        retention-days: 3
 
     - name: Verify built kernel config
       if: steps.compile.outputs.status == 'success'
