@@ -38,6 +38,27 @@ echo "==== [diy-lede-lite-p1] 追加 PON 相关 feeds ===="
 add_feed pon_drivers "$PON_DRIVERS"
 add_feed pon_userspace "$ONU_FEED"
 
+########################################
+# 关闭 helloworld feed
+#   LEDE 的 feeds.conf.default 默认启用 helloworld (fw876/helloworld)，
+#   里面就是 luci-app-ssr-plus / passwall / openclash / bypass / vssr 这些代理插件。
+#   纯净版不需要，直接注释掉：feeds update/install 就不会再克隆、安装它们，
+#   既省 clone 时间和磁盘（runner 只有 73G，编译期会写满），
+#   也让「默认包里写了 luci-app-ssr-plus」这种情况彻底不可能出现。
+########################################
+echo "==== [diy-lede-lite-p1] 关闭 helloworld feed（第三方代理插件来源）===="
+if grep -qE '^src-git helloworld ' feeds.conf.default; then
+  sed -i 's|^src-git helloworld |#src-git helloworld |' feeds.conf.default
+  echo "    已注释: $(grep -E '^#src-git helloworld ' feeds.conf.default)"
+elif grep -qE '^#\s*src-git helloworld ' feeds.conf.default; then
+  echo "    已是注释状态: $(grep -E '^#\s*src-git helloworld ' feeds.conf.default)"
+else
+  echo "    ℹ️  feeds.conf.default 里没有 helloworld 条目，跳过"
+fi
+if grep -qE '^\s*src-git helloworld ' feeds.conf.default; then
+  echo "    ❌ helloworld feed 仍处于启用状态"; exit 1
+fi
+
 echo "==== [diy-lede-lite-p1] 当前 feeds ===="
 grep -vE '^\s*#|^\s*$' feeds.conf.default
 echo "==== [diy-lede-lite-p1] 完成 ===="
