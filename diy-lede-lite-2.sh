@@ -237,13 +237,15 @@ then
 fi
 rm -f "$KNOWN_KMODS"
 
-# 上面改的是 feeds/<feed>/ 下的源文件, 但 feed index 是 feeds update 时生成的,
-# 里面还留着旧的依赖清单。feeds install 读的是 index, 会按旧依赖去算闭包
-# (run 41397279819 里 install 阶段仍打出 "No feed for package 'kmod-nf-conntrack-bridge'")。
-# 删掉这两个 index, 让 scripts/feeds install 重新扫描 Makefile。
-for idx in feeds/pon_userspace.index feeds/pon_drivers.index; do
-  [ -f "$idx" ] && { rm -f "$idx"; echo "    已清理过期索引: $idx"; }
-done
+# 注意: 这里不要再删 feeds/*.index。
+# 曾经试过删除 pon_userspace.index 让 feeds install 重新扫 Makefile, 结果 scripts/feeds
+# 不会自动重建索引, 而是直接
+#   Ignoring feed 'pon_userspace' - index missing
+# 整个 feed 被跳过, luci-app-onu 与 luci-app-pon-status 都没装, 后续 defconfig
+# 直接把 CONFIG_PACKAGE_luci-app-onu 丢掉。
+# index 里残留的旧依赖只会在 install 阶段打一条无害的
+#   WARNING: No feed for package 'kmod-nf-conntrack-bridge'
+# 而 make defconfig 的 genpackageindex 会重新扫 Makefile, 用的是改后的依赖, 不必处理。
 
 ########################################
 # 3) 去除 dummy 接口
