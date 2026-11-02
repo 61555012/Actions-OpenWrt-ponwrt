@@ -10,12 +10,18 @@
 # 落地文件: 无 —— 纯净版【不引用仓库 files/】，出厂默认值全部由 diy-lede-lite-2.sh 在构建期写进源码树
 #           默认 root 密码: admin123
 #
-# 纯净版 = 只保留"光口能起来 + 硬件加速转发"所需的最小集合:
+# 纯净版 = 只保留"光口能起来 + 拨号 + 硬件加速转发"所需的最小集合:
 #   ✓ PON 驱动栈 + 光模块驱动 EN7572（pbs05 feeds）  ✓ 2.5G PHY EN8811H
 #   ✓ fw4 flowtable(L2 桥接 + L3) + PPE 硬件加速      ✓ CONFIG_NET_AIROHA_FLOW_STATS=y
 #   ✓ luci + bootstrap + luci-app-onu / luci-app-pon-status
+#   ✓ 拨号: ppp / ppp-mod-pppoe / luci-proto-ppp      ✓ dnsmasq-full / odhcp6c / odhcpd
 #   ✓ 无 dummy 接口   ✓ 默认 root 密码 admin123
-#   ✗ argon 主题  ✗ OAF  ✗ mosdns  ✗ UPnP  ✗ NPU 面板  ✗ 仓库 files/ 覆盖层
+#   ✗ ssr-plus / passwall / openclash / bypass / vssr 等代理插件（helloworld feed 已关闭）
+#   ✗ turboacc / upnp / ddns / wol / vsftpd / vlmcsd / nlbwmon / autoreboot 等 lean 插件
+#   ✗ argon 主题  ✗ OAF  ✗ mosdns  ✗ NPU 面板  ✗ 仓库 files/ 覆盖层
+#
+# 第三方插件的来源是 LEDE 的 include/target.mk → DEFAULT_PACKAGES.router（默认带 lean 插件），
+# 由 diy-lede-lite-2.sh 在 defconfig 前替换成白名单，Verify 步骤会硬校验。
 #
 # 产物区分: Release tag 前缀 lede-lite-040g-md-
 # 工具链缓存独立: toolchain-lede-an7581-*（LEDE 的 tools/toolchain 与 PonWrt 不同，不能混用）
@@ -188,20 +194,49 @@ jobs:
         else
           echo "❌ CONFIG_NET_AIROHA_FLOW_STATS 未在 config-6.18 中打开"; ok=0
         fi
+        echo "----- 拨号 / 基础路由（必须存在）-----"
+        need CONFIG_PACKAGE_ppp
+        need CONFIG_PACKAGE_ppp-mod-pppoe
+        need CONFIG_PACKAGE_luci-proto-ppp
+        need CONFIG_PACKAGE_luci-proto-ipv6
+        need CONFIG_PACKAGE_dnsmasq-full
+        need CONFIG_PACKAGE_odhcp6c
+        need CONFIG_PACKAGE_luci-app-firewall
         echo "----- 基础管理界面 -----"
         need CONFIG_PACKAGE_luci
         need CONFIG_PACKAGE_luci-app-onu
         need CONFIG_PACKAGE_luci-app-pon-status
         need CONFIG_PACKAGE_luci-theme-bootstrap
-        echo "----- 纯净版排除项（argon / OAF / mosdns / UPnP / NPU 面板）-----"
+        echo "----- 纯净版排除项（代理插件 / lean 插件 / OAF / mosdns / NPU 面板）-----"
+        for p in luci-app-ssr-plus luci-app-passwall luci-app-passwall2 luci-app-openclash \
+                 luci-app-bypass luci-app-vssr luci-app-turboacc luci-app-upnp luci-app-ddns \
+                 luci-app-vsftpd luci-app-filetransfer luci-app-vlmcsd luci-app-wol \
+                 luci-app-arpbind luci-app-accesscontrol luci-app-nlbwmon luci-app-autoreboot \
+                 xray-core v2ray-core coremark kmod-tun kmod-ipt-raw iptables-mod-tproxy; do
+          absent "CONFIG_PACKAGE_$p"
+        done
         absent CONFIG_PACKAGE_luci-theme-argon
         absent CONFIG_PACKAGE_kmod-oaf
         absent CONFIG_PACKAGE_appfilter
         absent CONFIG_PACKAGE_luci-app-oaf
         absent CONFIG_PACKAGE_mosdns
         absent CONFIG_PACKAGE_luci-app-mosdns
-        absent CONFIG_PACKAGE_luci-app-upnp
         absent CONFIG_PACKAGE_luci-app-airoha-npu
+        echo "----- 默认包清单 / feeds 层面已剔除第三方插件 -----"
+        if grep -qE '^[[:space:]]*src-git helloworld ' feeds.conf.default 2>/dev/null; then
+          echo "❌ feeds.conf.default 仍启用 helloworld（ssr-plus/passwall 来源）"; ok=0
+        else
+          echo "✅ helloworld feed 已关闭"
+        fi
+        if grep -qE 'luci-app-(ssr-plus|passwall|openclash|bypass|vssr)' include/target.mk; then
+          echo "❌ include/target.mk 的 DEFAULT_PACKAGES 仍含第三方插件"
+          grep -nE 'luci-app-(ssr-plus|passwall|openclash|bypass|vssr)' include/target.mk | sed 's/^/   /'
+          ok=0
+        else
+          echo "✅ include/target.mk 默认包已白名单化（只剩拨号 + 基础路由）"
+        fi
+        echo "   默认包清单:"
+        sed -n '/^DEFAULT_PACKAGES\.router:=/,/[^\\]$/p' include/target.mk | tr -s ' \t' ' ' | sed 's/^/     /'
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
           echo "❌ kmod-dummy 仍被选中"; ok=0
@@ -416,13 +451,14 @@ jobs:
           echo "|------|------|"
           echo "| 源码 | $REPO_URL ($REPO_BRANCH) |"
           echo "| 设备 | airoha/an7581 / nokia_xg-040g-md-ubi |"
-          echo "| 定位 | 纯净版: 仅光口 + 硬件加速转发，无第三方插件 |"
+          echo "| 定位 | 纯净版: 光口 + 拨号 + 硬件加速转发，无任何第三方插件 |"
+          echo "| 拨号 | ppp / ppp-mod-pppoe / luci-proto-ppp（PPPoE 拨号）|"
           echo "| 硬件加速 | fw4 flowtable(L2+L3) + PPE, 默认 flow_offloading=1 |"
           echo "| 每流统计 | CONFIG_NET_AIROHA_FLOW_STATS=y |"
           echo "| PON | airoha-xpon + pon-frontend + en7572 (pbs05 feeds) |"
           echo "| 2.5G | phy-airoha-en8811h (lan1) |"
           echo "| 主题 | luci-theme-bootstrap（不含 argon）|"
-          echo "| 已排除 | argon / OAF / mosdns / UPnP / NPU 面板 |"
+          echo "| 已排除 | ssr-plus / passwall / openclash / turboacc / upnp / ddns / argon / OAF / mosdns / NPU 面板 |"
           echo "| 出厂配置 | 不含仓库 files/ 覆盖层，默认 root 密码 \`admin123\` |"
           echo "| 时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
         } > release.txt
