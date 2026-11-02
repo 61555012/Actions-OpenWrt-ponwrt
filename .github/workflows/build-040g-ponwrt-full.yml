@@ -67,8 +67,15 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        # runner 只有 73G 磁盘, 编译期必然吃满; 先把镜像里用不到的大件清干净
+        # (android sdk / dotnet / ghc / hostedtoolcache / boost / swift / ghcup / docker 镜像)
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
+                    /opt/microsoft /usr/local/lib/node_modules /opt/az /usr/local/aws-cli || true
         sudo docker image prune --all --force
+        sudo docker system prune -af --volumes || true
+        sudo rm -rf /var/lib/apt/lists/*
+        echo "----- 清理后磁盘 -----"; df -hT /
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
         sudo -E apt-get -qq autoremove --purge
@@ -361,7 +368,29 @@ jobs:
       run: |
         cd openwrt
         echo "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        df -hT /
+        # 原写法 make -j || make -j1 || make -j1 V=s: 磁盘写满时也会重试两次, 白耗十几分钟
+        set +e
+        make -j$(nproc) 2>&1 | tee /tmp/build.log
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [ "$rc" -ne 0 ]; then
+          if grep -qE 'No space left on device|running out of disk space' /tmp/build.log; then
+            echo "::error::磁盘写满 (ENOSPC), 编译中断; 重试只会继续失败"
+            df -hT /
+            exit 1
+          fi
+          echo "::warning::首次编译失败 (非磁盘原因), 降为单线程重试"
+          set +e
+          make -j1 2>&1 | tee -a /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+        fi
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::编译失败, 末尾 80 行日志:"
+          tail -80 /tmp/build.log
+          exit 1
+        fi
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
