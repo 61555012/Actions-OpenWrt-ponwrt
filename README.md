@@ -89,6 +89,24 @@ uci set firewall.@defaults[0].flow_offloading_hw='0'
 uci commit firewall && /etc/init.d/firewall reload
 ```
 
+### 4.1 PPE 条目在 TCP FIN 后的老化时间（1s → 30s）
+
+`airoha_ppe_hw_init()` 里 `PPE_BIND_AGE1` 的 `delta_tcp_fin` 上游取 **1 秒**（`delta_tcp` 是 60 秒）。
+收到 FIN 的流由硬件按它老化，也就是最后一个包之后约 1 秒条目就从 PPE 表里消失。
+这和 `/sys/kernel/debug/ppe/entries` 的 1 秒整表 dump（单次 ~300ms）撞在一起：
+**秒级结束的大流量常常只统计到一部分**，实测同一批 3×9.7MB 下载，精度在 14%~145% 之间抖。
+
+两个 diy 脚本（`diy-ponwrt-full-2.sh` / `diy-ponwrt-lite-2.sh`）会往
+`target/linux/airoha/patches-6.18/700-net-airoha-ppe-raise-tcp-fin-age.patch` 写一个补丁，
+把 `delta_tcp_fin` 改成 **30 秒**；编译后的 `Verify built kernel config` 步骤会复查内核源码里的实际值，
+没生效直接判失败，不会静默产出“没改过”的固件。
+
+- **效果**：同一批下载的统计精度收敛到 ~104%（≈ 以太网/IP/TCP 头开销）。
+- **代价**：已结束的连接多占 30 秒槽位（表 16K 槽，家用几百条流，无压力），TCP 常态老化 60s 不变。
+- **撤销**：把补丁里的 `30` 改回 `1`，或整段 heredoc 删掉。
+- **注意**：运行中改寄存器无效。实测 `devmem 0x1FB50E40 32 0x001E003C`（FIN=30）后条目仍在 0.5s 内回收，
+  这些 delta 只在 `airoha_ppe_hw_init()` 初始化时锁存，只能改源码重编。
+
 ### 5. OAF 为什么要“先删再拉”
 
 PonWrt 主树本身不含 OAF（`feeds.conf.default` 只有 packages/luci/routing/telephony/video/pon_drivers/pon_userspace），`configs/an7581.config` 里那三行 `CONFIG_PACKAGE_kmod-oaf/appfilter/luci-app-appfilter` 是历史残留。但 feeds 或旧分支可能带一份旧版 OpenAppFilter，**用户态 `appfilter` 与 `kmod-oaf` 版本不匹配会直接 insmod 失败**。所以 `diy-ponwrt-full-2.sh` 按 S20P 的做法：

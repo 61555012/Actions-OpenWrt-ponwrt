@@ -50,6 +50,57 @@ else
   echo "    ❌ 未找到 $KC"; exit 1
 fi
 
+########################################
+# 1b) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
+#
+# 为什么改:
+#   airoha_ppe_hw_init() 给 PPE_BIND_AGE1 写的 delta_tcp_fin 是 1(秒),
+#   delta_tcp 是 60(秒)。收到 FIN 的流由硬件按 delta_tcp_fin 老化,
+#   也就是"最后一个包之后约 1 秒"条目就从 PPE 表里消失。
+#   而设备流量采样器(/usr/sbin/cr-sampler.uc)是 1 秒一拍的整表 dump
+#   (/sys/kernel/debug/ppe/entries 单次约 300ms), 条目 FIN 后 0.2~1.0s
+#   就被回收 -> 秒级结束的大流量只能统计到一部分:
+#   实测同一批 3x9.7MB 下载, 统计精度在 14%~145% 之间抖。
+#   把 FIN 老化放到 30s, 条目多留一会儿, 1 秒采样能稳定命中终值,
+#   同一批下载的精度收敛到 ~104%(正好等于以太网/IP/TCP 头开销)。
+#
+# 代价:
+#   已结束的连接在 PPE 表里多占 30 秒槽位。表有 16K 槽(4K SRAM + 12K DRAM),
+#   家用场景同时在用的流只有几百条, 没有压力; TCP 的常态老化(60s)保持不变。
+#
+# 写法:
+#   往 target/linux/airoha/patches-6.18/ 放一个普通 unified diff,
+#   内核解包时由 buildroot 的 quilt 流程自动打上(-p1)。
+#   万一上游改动了这段代码导致打不上, 内核 prepare 阶段会直接报错中断,
+#   不会静默产出"没改过"的固件。
+########################################
+echo "==== [diy-part2] 拉长 PPE TCP_FIN 老化时间 (1s -> 30s) ===="
+PDIR=target/linux/airoha/patches-6.18
+if [ ! -d "$PDIR" ]; then
+  echo "    ❌ 未找到 $PDIR（上游内核版本变了？检查目录名）"; exit 1
+fi
+PFILE="$PDIR/700-net-airoha-ppe-raise-tcp-fin-age.patch"
+cat > "$PFILE" <<'PATCH_EOF'
+diff --git a/drivers/net/ethernet/airoha/airoha_ppe.c b/drivers/net/ethernet/airoha/airoha_ppe.c
+index 8defd19..5266da8 100644
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -116,7 +116,7 @@ static void airoha_ppe_hw_init(struct airoha_ppe *ppe)
+ 		airoha_fe_rmw(eth, REG_PPE_BND_AGE1(i),
+ 			      PPE_BIND_AGE1_DELTA_TCP_FIN |
+ 			      PPE_BIND_AGE1_DELTA_TCP,
+-			      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP_FIN, 1) |
++			      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP_FIN, 30) |
+ 			      FIELD_PREP(PPE_BIND_AGE1_DELTA_TCP, 60));
+ 
+ 		airoha_fe_rmw(eth, REG_PPE_TB_HASH_CFG(i),
+PATCH_EOF
+if grep -q 'PPE_BIND_AGE1_DELTA_TCP_FIN, 30' "$PFILE"; then
+  echo "    ✅ 已写入 $PFILE"
+else
+  echo "    ❌ 补丁写入异常: $PFILE"; exit 1
+fi
+
 # 硬件加速链路必需的 conntrack bridge 支持（an7581 target.mk 已默认带，这里做兜底断言）
 echo "==== [diy-part2] 检查 kmod-nf-conntrack-bridge 是否在默认包 ===="
 if grep -q 'kmod-nf-conntrack-bridge' target/linux/airoha/an7581/target.mk; then

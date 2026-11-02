@@ -470,6 +470,19 @@ jobs:
             && echo "✅ 内核已编入每流统计" \
             || echo "⚠️  CONFIG_NET_AIROHA_FLOW_STATS 未生效(检查 Kconfig 依赖)"
         fi
+        echo "===== PPE TCP_FIN 老化时间 (补丁应已生效: 30s) ====="
+        PSRC=$(ls -d build_dir/target-*/linux-airoha_an7581/linux-*/drivers/net/ethernet/airoha/airoha_ppe.c 2>/dev/null | head -1)
+        if [ -n "$PSRC" ]; then
+          grep -nE 'FIELD_PREP\(PPE_BIND_AGE1_DELTA_TCP_FIN,' "$PSRC" | sed 's/^/  /'
+          if grep -qE 'PPE_BIND_AGE1_DELTA_TCP_FIN, 30\)' "$PSRC"; then
+            echo "✅ TCP_FIN 老化已改为 30s (条目在 FIN 后多留 30s, 流量统计能取到终值)"
+          else
+            echo "❌ TCP_FIN 老化补丁未生效: 内核里还是 1s, 秒级大流量的统计会明显偏低"
+            exit 1
+          fi
+        else
+          echo "⚠️  找不到已解包的 airoha_ppe.c, 跳过检查"
+        fi
         echo "===== 生成的包 (PON / PHY) ====="
         ls bin/targets/airoha/an7581/packages/ 2>/dev/null | grep -iE 'airoha-(xpon|en7572|pon)|en8811h' || true
 
