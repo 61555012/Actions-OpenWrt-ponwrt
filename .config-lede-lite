@@ -14,10 +14,14 @@
 #   ✓ 2.5G PHY EN8811H 驱动与固件
 #   ✓ fw4 flowtable / PPE 硬件加速 + 每流字节统计（CONFIG_NET_AIROHA_FLOW_STATS）
 #   ✓ luci + 内置 bootstrap 主题 + luci-app-onu / luci-app-pon-status
+#   ✓ 拨号链路: ppp + ppp-mod-pppoe + luci-proto-ppp（PPPoE 拨号）
+#   ✓ dnsmasq-full / odhcp6c / odhcpd-ipv6only（DHCP + IPv6）
 #   ✓ 无 dummy 接口，默认 root 密码 admin123
 #
-# 排除:
-#   ✗ argon 主题 ✗ OAF ✗ mosdns ✗ UPnP ✗ NPU 面板 ✗ 各类 LEDE 额外插件
+# 排除（LEDE 的 DEFAULT_PACKAGES.router 默认带，已由 diy-lede-lite-2.sh 白名单化）:
+#   ✗ ssr-plus / passwall / openclash / bypass / vssr 等代理插件
+#   ✗ turboacc / upnp / ddns / wol / vsftpd / vlmcsd / nlbwmon / autoreboot / arpbind 等 lean 插件
+#   ✗ argon 主题 ✗ OAF ✗ mosdns ✗ NPU 面板 ✗ kmod-tun / tproxy（透明代理专用）
 #
 
 #
@@ -78,7 +82,60 @@ CONFIG_PACKAGE_luci-app-onu=y
 CONFIG_PACKAGE_luci-app-pon-status=y
 
 #
+# ---------- 拨号 / 基础路由（显式选中，其余一律不装）----------
+# LEDE 的 DEFAULT_PACKAGES.router 自带一堆 lean 插件（见下），
+# diy-lede-lite-2.sh 里已把默认包清单改成白名单；这里再显式选一遍，
+# 保证即使上游改了默认包，拨号链路也不会缺件。
+#
+CONFIG_PACKAGE_ppp=y
+CONFIG_PACKAGE_ppp-mod-pppoe=y
+CONFIG_PACKAGE_luci-proto-ppp=y
+CONFIG_PACKAGE_luci-proto-ipv6=y
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_odhcp6c=y
+CONFIG_PACKAGE_odhcpd-ipv6only=y
+
+#
 # ---------- 第三方组件全部关闭 ----------
+#
+# >>> 插件类（LEDE DEFAULT_PACKAGES.router 默认会带上，必须显式置 n）<<<
+# SSR+ / PassWall / OpenClash 等代理插件
+# CONFIG_PACKAGE_luci-app-ssr-plus is not set
+# CONFIG_PACKAGE_luci-app-passwall is not set
+# CONFIG_PACKAGE_luci-app-passwall2 is not set
+# CONFIG_PACKAGE_luci-app-openclash is not set
+# CONFIG_PACKAGE_luci-app-bypass is not set
+# CONFIG_PACKAGE_luci-app-vssr is not set
+# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray is not set
+# CONFIG_PACKAGE_xray-core is not set
+# CONFIG_PACKAGE_v2ray-core is not set
+# CONFIG_PACKAGE_trojan-plus is not set
+# CONFIG_PACKAGE_shadowsocks-libev-ss-redir is not set
+#
+# 透明代理用的内核/工具（拨号用不到）
+# CONFIG_PACKAGE_kmod-tun is not set
+# CONFIG_PACKAGE_kmod-ipt-raw is not set
+# CONFIG_PACKAGE_iptables-mod-tproxy is not set
+#
+# 流量整形 / BPF 加速（turboacc 依赖，拨号用不到）
+# CONFIG_PACKAGE_luci-app-turboacc is not set
+# CONFIG_PACKAGE_kmod-sched-bpf is not set
+# CONFIG_PACKAGE_kmod-xdp-sockets-diag is not set
+#
+# 其余 lean 默认插件
+# CONFIG_PACKAGE_luci-app-upnp is not set
+# CONFIG_PACKAGE_luci-app-autoreboot is not set
+# CONFIG_PACKAGE_luci-app-arpbind is not set
+# CONFIG_PACKAGE_luci-app-filetransfer is not set
+# CONFIG_PACKAGE_luci-app-vsftpd is not set
+# CONFIG_PACKAGE_luci-app-vlmcsd is not set
+# CONFIG_PACKAGE_luci-app-accesscontrol is not set
+# CONFIG_PACKAGE_luci-app-nlbwmon is not set
+# CONFIG_PACKAGE_luci-app-wol is not set
+# CONFIG_PACKAGE_luci-app-ddns is not set
+# CONFIG_PACKAGE_ddns-scripts_aliyun is not set
+# CONFIG_PACKAGE_ddns-scripts_dnspod is not set
+# CONFIG_PACKAGE_coremark is not set
 #
 # argon 主题
 # CONFIG_PACKAGE_luci-theme-argon is not set
