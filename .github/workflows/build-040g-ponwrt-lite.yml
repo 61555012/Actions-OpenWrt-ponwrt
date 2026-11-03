@@ -126,11 +126,12 @@ jobs:
         grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE)=' .config
         grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
         # ---- ccache: 编译器对象缓存, 跨构建复用已编译的 .o ----
+        # Config.in / Config-build.in 里没有 "config CCACHE" 这个符号, 探测式永远不成立
+        # (实测连续几轮都是 warning)。rules.mk 判的是 make 变量 CONFIG_CCACHE,
+        # 直接写进 .config 即可, 但不要紧跟 make defconfig —— kconfig 认不得这个符号, 会把它清掉。
+        # 可用性由后面的 Handle toolchain 校验: ccache 起不来就删掉这行并回退。
         if ! grep -q '^CONFIG_CCACHE=y' .config; then
-          if grep -qE '^[[:space:]]*config[[:space:]]+CCACHE$' Config-build.in 2>/dev/null; then
-            echo 'CONFIG_CCACHE=y' >> .config
-            make defconfig
-          fi
+          echo 'CONFIG_CCACHE=y' >> .config
         fi
         if grep -q '^CONFIG_CCACHE=y' .config; then
           echo "✅ CONFIG_CCACHE 已启用（host ccache 在工具链阶段校验）"
@@ -318,18 +319,31 @@ jobs:
         fi
         sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
         echo "Makefile 已修改: 后续跳过工具链重编译"
-        # ---- ccache: 确保 host ccache 可用, 否则回退关闭, 避免编译期 command not found ----
+        # ---- ccache: 确保 ccache 可用, 否则回退关闭, 避免编译期 command not found ----
+        # 关键: rules.mk 里是 TARGET_CC := ccache $(TARGET_CC), 用的是 PATH 上的 ccache,
+        # 并不要求 staging_dir/host/bin/ccache 存在。上一版只查 staging 目录,
+        # 于是 apt 装好的 /usr/bin/ccache 明明可用也被判"不可用", CONFIG_CCACHE 被白删。
         if grep -q '^CONFIG_CCACHE=y' .config 2>/dev/null; then
-          if [ ! -x staging_dir/host/bin/ccache ]; then
-            echo "工具链缓存不含 host ccache, 补编..."
-            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+          CCB=$(command -v ccache 2>/dev/null || true)
+          if [ -z "$CCB" ] || [ ! -x "$CCB" ]; then
+            CCB=""
+            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
           fi
-          if [ -x staging_dir/host/bin/ccache ]; then
-            mkdir -p .ccache
-            staging_dir/host/bin/ccache --max-size=1G || true
-            staging_dir/host/bin/ccache --version | head -1
+          if [ -z "$CCB" ]; then
+            echo "PATH 和 staging_dir/host/bin 都没有 ccache, 尝试补编..."
+            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
+          fi
+          if [ -n "$CCB" ]; then
+            # rules.mk 里 CCACHE_DIR 默认 $(TOPDIR)/.ccache, 与 actions/cache 的路径一致
+            export CCACHE_DIR="$PWD/.ccache"
+            mkdir -p "$CCACHE_DIR"
+            "$CCB" --max-size=1G >/dev/null 2>&1 || true
+            echo "✅ ccache 可用: $CCB"
+            "$CCB" --version | head -1 || true
+            "$CCB" -s | head -8 || true
           else
-            echo "::warning::host ccache 不可用, 回退关闭 CONFIG_CCACHE"
+            echo "::warning::ccache 不可用, 回退关闭 CONFIG_CCACHE"
             sed -i '/^CONFIG_CCACHE/d' .config
             echo '# CONFIG_CCACHE is not set' >> .config
             make defconfig
@@ -392,6 +406,15 @@ jobs:
         cd openwrt
         echo "dl 命中: ${{ steps.dl-cache.outputs.cache-hit }} / ccache 命中: ${{ steps.ccache-cache.outputs.cache-hit }}"
         du -sh dl 2>/dev/null || echo "dl 尚不存在"
+        # Go 模块缓存 (dl/go-mod-cache) 不要跨构建复用。
+        # 实证: run 41485399379 / 41397272479 没有 dl 缓存时 mosdns 5.3.4 编译通过;
+        # run 41485388868 恢复了含 go-mod-cache 的 dl 缓存, package/mosdns/mosdns
+        # 进 compile 5 秒就 failed to build (GOMODCACHE 里是别的构建留下的模块集)。
+        # 删掉最稳: Go 包会在线重取, 多花 1~2 分钟, 换掉一类难查的秒失败。
+        if [ -d dl/go-mod-cache ]; then
+          echo "丢弃 dl/go-mod-cache ($(du -sh dl/go-mod-cache | cut -f1)), Go 包改为在线取模块"
+          rm -rf dl/go-mod-cache
+        fi
         du -sh .ccache 2>/dev/null || echo ".ccache 尚不存在"
         df -hT / | tail -1
 
@@ -419,19 +442,39 @@ jobs:
             df -hT /
             exit 1
           fi
-          echo "::warning::首次编译失败 (非磁盘原因), 降为单线程重试"
+          # -j 的 trace 输出会把真正的错误行淹掉、甚至不落盘, 必须 -j1 V=s 重跑才拿得到原因。
+          # 重跑只补做失败的那几个包 (stamp 都在), 一般几分钟, 不会重来两小时。
+          echo "::warning::首次编译失败 (非磁盘原因), 用 -j1 V=s 抓详细错误"
           set +e
-          make -j1 2>&1 | tee -a /tmp/build.log
-          rc=${PIPESTATUS[0]}
+          make -j1 V=s > /tmp/build2.log 2>&1
+          rc=$?
           set -e
         fi
         if [ "$rc" -ne 0 ]; then
-          echo "::error::编译失败, 末尾 80 行日志:"
-          tail -80 /tmp/build.log
+          echo "::error::编译失败"
+          echo "===== 关键错误行 ====="
+          grep -nE '(^|[[:space:]])(ERROR:|Error [0-9]+|error:|\*\*\* |No such file|Cannot |undefined reference|command not found)' /tmp/build2.log 2>/dev/null | tail -50 || true
+          echo "===== 失败包上下文 ====="
+          grep -nE 'make\[[0-9]+\].*(Error|\*\*\*)' /tmp/build2.log 2>/dev/null | tail -20 || true
+          echo "===== 磁盘 ====="
+          df -hT / || true
+          echo "===== 末尾 150 行 ====="
+          tail -150 /tmp/build2.log 2>/dev/null || tail -150 /tmp/build.log
           exit 1
         fi
         echo "status=success" >> $GITHUB_OUTPUT
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Upload build logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-ponwrt-lite
+        path: |
+          /tmp/build.log
+          /tmp/build2.log
+        if-no-files-found: ignore
+        retention-days: 3
 
     - name: Verify built kernel config
       if: steps.compile.outputs.status == 'success'
