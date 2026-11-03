@@ -78,7 +78,15 @@ CONFIG_PACKAGE_kmod-nf-conntrack=y
 #
 # ---------- PON 管理界面（配注册/桥接所必需）----------
 #
-CONFIG_PACKAGE_luci-app-onu=y
+# luci-app-onu (naoki66/pon_userspace) 与 LEDE 自带的 luci-app-pon / luci-app-iptv
+# 装的是同一批文件: /usr/libexec/airoha-pon-data, pon-board-identity, pon-identity-image,
+# /etc/init.d/iptv, iptv-apply。两个同时选中, package/install 阶段 opkg 必报
+#   check_data_file_clashes: Package luci-app-onu wants to install file ... 
+#   But that file is already provided by package * luci-app-pon
+# 然后 Cannot install package luci-app-onu 直接失败 (run 41411537597 实证)。
+# 二选一, 这里用 LEDE 原生那套 (与 target 匹配, 且 pon-status 依赖它)。
+# CONFIG_PACKAGE_luci-app-onu is not set
+CONFIG_PACKAGE_luci-app-pon=y
 CONFIG_PACKAGE_luci-app-pon-status=y
 
 #
