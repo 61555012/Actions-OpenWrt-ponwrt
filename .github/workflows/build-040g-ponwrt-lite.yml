@@ -319,31 +319,34 @@ jobs:
         fi
         sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
         echo "Makefile 已修改: 后续跳过工具链重编译"
-        # ---- ccache: 确保 ccache 可用, 否则回退关闭, 避免编译期 command not found ----
-        # 关键: rules.mk 里是 TARGET_CC := ccache $(TARGET_CC), 用的是 PATH 上的 ccache,
-        # 并不要求 staging_dir/host/bin/ccache 存在。上一版只查 staging 目录,
-        # 于是 apt 装好的 /usr/bin/ccache 明明可用也被判"不可用", CONFIG_CCACHE 被白删。
+        # ---- ccache: PATH 与 staging 两个通道都要通, 否则回退关闭 ----
+        # 1) rules.mk:  TARGET_CC := ccache $(TARGET_CC)                         → 走 PATH
+        # 2) cmake.mk:  -DCMAKE_C_COMPILER_LAUNCHER=$(STAGING_DIR_HOST)/bin/ccache → 绝对路径
+        # 上一版只校验 PATH, 结果 cmake 包 (libnl-tiny / fwtool 等) 编译期报
+        #   /bin/sh: .../staging_dir/host/bin/ccache: not found  → Error 127
         if grep -q '^CONFIG_CCACHE=y' .config 2>/dev/null; then
-          CCB=$(command -v ccache 2>/dev/null || true)
-          if [ -z "$CCB" ] || [ ! -x "$CCB" ]; then
-            CCB=""
-            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
+          SYSCC=$(command -v ccache 2>/dev/null || true)
+          mkdir -p staging_dir/host/bin
+          if [ ! -x staging_dir/host/bin/ccache ]; then
+            if [ -n "$SYSCC" ]; then
+              echo "补 staging ccache: $SYSCC -> staging_dir/host/bin/ccache (cmake.mk 需要该绝对路径)"
+              ln -sf "$SYSCC" staging_dir/host/bin/ccache 2>/dev/null \
+                || cp -f "$SYSCC" staging_dir/host/bin/ccache 2>/dev/null || true
+            else
+              echo "PATH 上没有 ccache, 尝试 make tools/ccache/install ..."
+              make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+            fi
           fi
-          if [ -z "$CCB" ]; then
-            echo "PATH 和 staging_dir/host/bin 都没有 ccache, 尝试补编..."
-            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
-            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
-          fi
-          if [ -n "$CCB" ]; then
+          if [ -x staging_dir/host/bin/ccache ]; then
             # rules.mk 里 CCACHE_DIR 默认 $(TOPDIR)/.ccache, 与 actions/cache 的路径一致
             export CCACHE_DIR="$PWD/.ccache"
             mkdir -p "$CCACHE_DIR"
-            "$CCB" --max-size=1G >/dev/null 2>&1 || true
-            echo "✅ ccache 可用: $CCB"
-            "$CCB" --version | head -1 || true
-            "$CCB" -s | head -8 || true
+            staging_dir/host/bin/ccache --max-size=1G >/dev/null 2>&1 || true
+            echo "✅ ccache 可用 (PATH + staging 双通道均已满足):"
+            staging_dir/host/bin/ccache --version | head -1 || true
+            staging_dir/host/bin/ccache -s | head -8 || true
           else
-            echo "::warning::ccache 不可用, 回退关闭 CONFIG_CCACHE"
+            echo "::warning::ccache 不可用 (staging_dir/host/bin/ccache 缺失且无法补齐), 回退关闭 CONFIG_CCACHE"
             sed -i '/^CONFIG_CCACHE/d' .config
             echo '# CONFIG_CCACHE is not set' >> .config
             make defconfig
