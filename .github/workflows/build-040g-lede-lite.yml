@@ -13,7 +13,7 @@
 # 纯净版 = 只保留"光口能起来 + 拨号 + 硬件加速转发"所需的最小集合:
 #   ✓ PON 驱动栈 + 光模块驱动 EN7572（pbs05 feeds）  ✓ 2.5G PHY EN8811H
 #   ✓ fw4 flowtable(L2 桥接 + L3) + PPE 硬件加速      ✓ CONFIG_NET_AIROHA_FLOW_STATS=y
-#   ✓ luci + bootstrap + luci-app-onu / luci-app-pon-status
+#   ✓ luci + bootstrap + luci-app-pon (LEDE 原生) / luci-app-pon-status
 #   ✓ 拨号: ppp / ppp-mod-pppoe / luci-proto-ppp      ✓ dnsmasq-full / odhcp6c / odhcpd
 #   ✓ 无 dummy 接口   ✓ 默认 root 密码 admin123
 #   ✗ ssr-plus / passwall / openclash / bypass / vssr 等代理插件（helloworld feed 已关闭）
@@ -125,8 +125,8 @@ jobs:
         # 因为它依赖的 airoha-pond / airoha-ponctl / kmod-airoha-xpon 根本没进安装列表
         # (run 41397279819 就是这个现象: 编译全过, package/install 6 秒失败)。
         #
-        # 统一以 LEDE 自带 packages/pon 为准, pon_userspace 只保留 luci-app-onu 与
-        # luci-app-pon-status 这两个 packages 里没有的包。
+        # 统一以 LEDE 自带 packages/pon 为准, pon_userspace 只保留 luci-app-pon-status
+        # (包含 luci-app-onu 的那两个包会与原生 luci-app-pon 写同一批文件, 已弃用 onu)。
         # 注意: scripts/feeds install 会把 feed 内的目录层级「展平」,
         # feeds/packages/pon/airoha-ponctl 装成 package/feeds/packages/airoha-ponctl,
         # 所以基准目录是 package/feeds/packages, 不是 package/feeds/packages/pon。
@@ -173,8 +173,9 @@ jobs:
         for p in airoha-pon-daemons airoha-ponctl airoha-xpon; do
           [ -e "$BASE/$p" ] || { echo "::error::LEDE packages 缺少 $p"; exit 1; }
         done
-        # luci-app-onu / luci-app-pon-status 必须还在 pon_userspace 下 (packages 里没有)
-        for p in luci-app-onu luci-app-pon-status; do
+        # luci-app-pon-status 必须还在 pon_userspace 下 (packages 里没有)
+        # luci-app-onu 已不再选用 (与原生 luci-app-pon 文件冲突), 故不再断言
+        for p in luci-app-pon-status; do
           [ -e "package/feeds/pon_userspace/$p" ] || { echo "::error::pon_userspace 缺少 $p"; exit 1; }
         done
         echo "✅ airoha-pon-daemons / airoha-ponctl / airoha-xpon 均来自 LEDE packages"
@@ -285,8 +286,12 @@ jobs:
         need CONFIG_PACKAGE_luci-app-firewall
         echo "----- 基础管理界面 -----"
         need CONFIG_PACKAGE_luci
-        need CONFIG_PACKAGE_luci-app-onu
+        need CONFIG_PACKAGE_luci-app-pon
         need CONFIG_PACKAGE_luci-app-pon-status
+        # 互斥检查: luci-app-onu 与原生 luci-app-pon 装同一批文件, 同选必炸
+        if grep -q '^CONFIG_PACKAGE_luci-app-onu=y' .config && grep -q '^CONFIG_PACKAGE_luci-app-pon=y' .config; then
+          echo "❌ luci-app-onu 与 luci-app-pon 同时选中, check_data_file_clashes 必失败"; ok=0
+        fi
         need CONFIG_PACKAGE_luci-theme-bootstrap
         echo "----- 纯净版排除项（代理插件 / lean 插件 / OAF / mosdns / NPU 面板）-----"
         for p in luci-app-ssr-plus luci-app-passwall luci-app-passwall2 luci-app-openclash \
@@ -446,18 +451,31 @@ jobs:
         fi
         sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
         echo "Makefile 已修改: 后续跳过工具链重编译"
-        # ---- ccache: 确保 host ccache 可用, 否则回退关闭, 避免编译期 command not found ----
+        # ---- ccache: 确保 ccache 可用, 否则回退关闭, 避免编译期 command not found ----
+        # 关键: rules.mk 里是 TARGET_CC := ccache $(TARGET_CC), 用的是 PATH 上的 ccache,
+        # 并不要求 staging_dir/host/bin/ccache 存在。上一版只查 staging 目录,
+        # 于是 apt 装好的 /usr/bin/ccache 明明可用也被判"不可用", CONFIG_CCACHE 被白删。
         if grep -q '^CONFIG_CCACHE=y' .config 2>/dev/null; then
-          if [ ! -x staging_dir/host/bin/ccache ]; then
-            echo "工具链缓存不含 host ccache, 补编..."
-            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+          CCB=$(command -v ccache 2>/dev/null || true)
+          if [ -z "$CCB" ] || [ ! -x "$CCB" ]; then
+            CCB=""
+            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
           fi
-          if [ -x staging_dir/host/bin/ccache ]; then
-            mkdir -p .ccache
-            staging_dir/host/bin/ccache --max-size=1G || true
-            staging_dir/host/bin/ccache --version | head -1
+          if [ -z "$CCB" ]; then
+            echo "PATH 和 staging_dir/host/bin 都没有 ccache, 尝试补编..."
+            make tools/ccache/install -j$(nproc) >/dev/null 2>&1 || true
+            if [ -x staging_dir/host/bin/ccache ]; then CCB="$PWD/staging_dir/host/bin/ccache"; fi
+          fi
+          if [ -n "$CCB" ]; then
+            # rules.mk 里 CCACHE_DIR 默认 $(TOPDIR)/.ccache, 与 actions/cache 的路径一致
+            export CCACHE_DIR="$PWD/.ccache"
+            mkdir -p "$CCACHE_DIR"
+            "$CCB" --max-size=1G >/dev/null 2>&1 || true
+            echo "✅ ccache 可用: $CCB"
+            "$CCB" --version | head -1 || true
+            "$CCB" -s | head -8 || true
           else
-            echo "::warning::host ccache 不可用, 回退关闭 CONFIG_CCACHE"
+            echo "::warning::ccache 不可用, 回退关闭 CONFIG_CCACHE"
             sed -i '/^CONFIG_CCACHE/d' .config
             echo '# CONFIG_CCACHE is not set' >> .config
             make defconfig
