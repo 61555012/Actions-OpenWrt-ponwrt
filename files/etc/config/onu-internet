@@ -1,0 +1,13 @@
+
+config internet 'config'
+	option enabled '1'
+	option mode 'pppoe'
+	option uplink 'pon0'
+	option transparent_mode 'tag'
+	option offload '1'
+	option ip_version 'ipv4_ipv6'
+	option mtu '1492'
+	option vlan '63'
+	option username '18896966260'
+	option password '123321'
+

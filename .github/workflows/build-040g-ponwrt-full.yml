@@ -32,6 +32,11 @@ on:
         description: 'SSH 连接调试'
         required: false
         default: 'false'
+  schedule:
+    # 每天早上 06:00（Asia/Shanghai）自动编一次。
+    # GitHub 的 cron 一律按 UTC 算，06:00 CST = 前一天 22:00 UTC，所以写 0 22 * * *
+    # 注意：GitHub 的定时任务在整点高峰常被推迟几分钟到半小时，属于平台行为。
+    - cron: '0 22 * * *'
 
 permissions:
   contents: write
@@ -248,9 +253,35 @@ jobs:
         echo "    appfilter: $(grep -m1 '^PKG_VERSION' package/open-app-filter/Makefile 2>/dev/null || echo '缺失')"
         echo "    luci-app-oaf: $(grep -m1 '^PKG_VERSION' package/luci-app-oaf/Makefile 2>/dev/null || echo '缺失')"
         echo "----- files/ 叠加层 -----"
-        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow; do
+        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow \
+                 etc/config/mosdns etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
+                 usr/lib/lua/luci/oaf_traffic.lua \
+                 usr/lib/lua/luci/controller/oaf_user.lua \
+                 usr/lib/lua/luci/controller/oaf_dashboard.lua \
+                 usr/lib/lua/luci/view/oaf/dashboard.htm \
+                 usr/lib/lua/luci/view/oaf/user_status.htm \
+                 usr/lib/lua/luci/view/oaf/user_detail.htm \
+                 usr/sbin/oaf-flowd etc/init.d/oaf-flowd; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
+        # 采集器 / 服务脚本必须带可执行位（git 在 Windows 上 checkout 会丢，靠 index 的 755 保住）
+        if [ -x "files/usr/sbin/oaf-flowd" ]; then
+          echo "✅ files/usr/sbin/oaf-flowd 可执行 ($(stat -c%s files/usr/sbin/oaf-flowd) 字节)"
+        else
+          echo "❌ files/usr/sbin/oaf-flowd 没有可执行位"; ok=0
+        fi
+        # OUI 品牌库（设备图标 + vendor 名字）
+        if [ -f "files/www/luci-static/resources/oui/vendors-d337209f8c00.json" ]; then
+          echo "✅ OUI 品牌库 $(ls files/www/luci-static/resources/oui/*.svg 2>/dev/null | wc -l) 个厂牌图标"
+        else
+          echo "❌ files/ 缺少 OUI 品牌库（设备图标会全部退化成首字母）"; ok=0
+        fi
+        # apk 必须关掉签名校验
+        if grep -qx 'allow-untrusted' files/etc/apk/config 2>/dev/null; then
+          echo "✅ apk 已关闭签名校验 (allow-untrusted)"
+        else
+          echo "❌ files/etc/apk/config 里没有 allow-untrusted"; ok=0
+        fi
         if ls files/www/luci-static/resources/oaf/app_icons/*.png >/dev/null 2>&1; then
           echo "✅ OAF 应用图标 $(ls files/www/luci-static/resources/oaf/app_icons/*.png | wc -l) 个"
         else

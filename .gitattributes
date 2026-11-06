@@ -8,3 +8,5 @@
 *.png binary
 *.bin binary
 *.itb binary
+# aarch64 静态二进制（Go 编的流量采集器），必须原样入库
+files/usr/sbin/oaf-flowd binary

@@ -6,7 +6,7 @@
 #   - 必须在 feeds update -a 之后: 否则 packages feed 会把 lang/golang 目录重新拉回覆盖
 #   - 必须在 feeds install -a 之前: 否则删掉源码树里的 OAF/mosdns 会留下 package/feeds 下的旧链接
 #
-# 本脚本做 9 件事:
+# 本脚本做 10 件事:
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
 #   2) 检查 kmod-nf-conntrack-bridge（L2 桥接加速前置）
 #   3) Go 工具链换成 sbwml/packages_lang_golang 最新分支（默认 27.x = Go 1.27.3）
@@ -16,6 +16,7 @@
 #   7) mosdns v5（sbwml/luci-app-mosdns v5，含本体 + LuCI + geo2txt）
 #   8) 去除 dummy 接口
 #   9) 断言 PON / 光模块 / 2.5G / 插件目录都在
+#  10) 删掉 LuCI 里没用的「系统 → 插件」页（视图 + 菜单项）
 #
 set -e
 
@@ -53,16 +54,32 @@ fi
 ########################################
 # 1b) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
 #
-# 为什么改:
+# 为什么改（和流量统计是同一件事，不是两件事）:
 #   airoha_ppe_hw_init() 给 PPE_BIND_AGE1 写的 delta_tcp_fin 是 1(秒),
 #   delta_tcp 是 60(秒)。收到 FIN 的流由硬件按 delta_tcp_fin 老化,
 #   也就是"最后一个包之后约 1 秒"条目就从 PPE 表里消失。
-#   而设备流量采样器(/usr/sbin/cr-sampler.uc)是 1 秒一拍的整表 dump
-#   (/sys/kernel/debug/ppe/entries 单次约 300ms), 条目 FIN 后 0.2~1.0s
-#   就被回收 -> 秒级结束的大流量只能统计到一部分:
+#
+#   报文一旦下到 PPE, 就不再经过 netfilter, conntrack 里的字节数只能靠驱动
+#   定期回写拿到:
+#     nf_flow_table → airoha_ppe_flow_offload_cmd(FLOW_CLS_STATS)
+#       → airoha_ppe_flow_offload_stats() → airoha_ppe_foe_entry_get_stats()
+#       → 读 npu->stats[index] 的增量, 累加进 flow 的 pkts/bytes
+#   FLOW_CLS_DESTROY（删条目）只 airoha_ppe_foe_flow_remove_entry(), 不取最后一次计数。
+#   所以条目一旦先被硬件回收, 下一次 FLOW_CLS_STATS 轮到这个 hash 时
+#   airoha_ppe_foe_get_flow_stats_index() 已经失败, 尾部这一截字节永久丢失。
+#
+#   /usr/sbin/oaf-flowd（本仓库的采集器）读的正是 conntrack 计数器
+#   （netlink destroy 事件 + /proc/net/nf_conntrack）, 丢的就是页面上
+#   每个设备 / 每个应用的流量数字。秒级结束的大流量丢得最狠:
 #   实测同一批 3x9.7MB 下载, 统计精度在 14%~145% 之间抖。
-#   把 FIN 老化放到 30s, 条目多留一会儿, 1 秒采样能稳定命中终值,
+#   把 FIN 老化放到 30s, 条目能活到下一次 stats 轮询之后再回收,
 #   同一批下载的精度收敛到 ~104%(正好等于以太网/IP/TCP 头开销)。
+#
+# 怎么验证打进去了（刷完固件，寄存器是初始化时锁存的，读回来就是实际生效值）:
+#   devmem 0x1FB50E40 32   →  0x001E003C  正确（0x1E=30 秒 FIN, 0x3C=60 秒 TCP）
+#   devmem 0x1FB50E40 32   →  0x0001003C  说明还是源码默认 1 秒，补丁没进内核
+#   注意：运行中用 devmem 写回这个寄存器无效（条目照样 0.5s 内回收），
+#   这些 delta 只在 airoha_ppe_hw_init() 里锁存一次，只能改源码重编。
 #
 # 代价:
 #   已结束的连接在 PPE 表里多占 30 秒槽位。表有 16K 槽(4K SRAM + 12K DRAM),
@@ -309,5 +326,55 @@ chk package/luci-app-airoha-npu
 chk feeds/packages/lang/golang
 if [ "$fail" = "1" ]; then echo "❌ 有包缺失，终止"; exit 1; fi
 echo "    ✅ 全部就位"
+
+########################################
+# 9) 删掉 LuCI「系统 → 插件」页
+#
+# 这个页面来自 luci-mod-system 的 luci-plugins 框架：
+#   htdocs/luci-static/resources/view/system/plugins.js  (视图)
+#   root/usr/share/luci/menu.d/luci-mod-system.json      (菜单项 admin/system/plugins)
+# 它只会扫描 /www/luci-static/resources/view/plugins/*.js 里的插件定义，
+# 本仓库不使用这套框架，那个目录一个插件都没有 —— 点进去只有一张空表加一个
+# 「全局设置」开关，纯属误点，所以整页删掉：
+#   1) 删视图文件，页面直接不存在
+#   2) 删菜单项，侧边栏不再出现「插件」
+# 改 JSON 优先用 python3（buildroot 自身依赖 python3，一定有），
+# 没有 python3 时退回 sed 按行删。
+########################################
+echo "==== [diy-part2] 删除 系统→插件 页面 ===="
+PLG_JS=$(find feeds/luci -type f -path '*resources/view/system/plugins.js' 2>/dev/null | head -1)
+MENU_JS=$(find feeds/luci -type f -path '*menu.d/luci-mod-system.json' 2>/dev/null | head -1)
+if [ -n "$PLG_JS" ]; then
+  rm -f "$PLG_JS"
+  echo "    ✅ 已删除视图 $PLG_JS"
+else
+  echo "    ⚠️  未找到 plugins.js（luci 源结构变了？）"
+fi
+if [ -n "$MENU_JS" ]; then
+  cp "$MENU_JS" "$MENU_JS.orig"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MENU_JS" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p, encoding='utf-8') as f:
+    d = json.load(f)
+d.pop('admin/system/plugins', None)
+with open(p, 'w', encoding='utf-8') as f:
+    json.dump(d, f, indent='\t', ensure_ascii=False)
+    f.write('\n')
+PY
+  else
+    TAB=$'\t'
+    sed -i "/\"admin\/system\/plugins\": {/,/^${TAB}},$/d" "$MENU_JS"
+  fi
+  if grep -q '"admin/system/plugins"' "$MENU_JS"; then
+    cp "$MENU_JS.orig" "$MENU_JS"
+    echo "    ❌ 菜单项删除失败，已回滚: $MENU_JS"; exit 1
+  fi
+  rm -f "$MENU_JS.orig"
+  echo "    ✅ 已移除菜单项 admin/system/plugins（$MENU_JS）"
+else
+  echo "    ⚠️  未找到 luci-mod-system.json"
+fi
 
 echo "==== [diy-part2] 完成 ===="

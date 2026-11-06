@@ -5,14 +5,16 @@
 # 纯净版不引用仓库里的 files/ 覆盖层（不带实机 PPPoE 账号、不带个人密码、不带 UPnP 配置），
 # 所有默认值都在构建期直接写进源码树，等价于"固件出厂状态"。
 #
-# 本脚本做 6 件事（不 clone 任何第三方插件）:
+# 本脚本做 8 件事（不 clone 任何第三方插件）:
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
 #      （PPE 的 airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS 依赖它，否则计数恒 0）
 #   2) 断言 L2 桥接卸载前置 kmod-nf-conntrack-bridge 在默认包里
 #   3) 从 base-files / target 的 network 模板里删掉 dummy 段
 #   4) 生成首启 uci-defaults: 默认打开 flow_offloading(含硬件) + dummy 兜底清理
 #   5) 默认 root 密码设为 admin123
-#   6) 断言 PON / 光模块 / ONU 用户态包目录都在
+#   6) 关掉 apk 安装签名要求（出厂即允许装未签名的包）
+#   7) 删掉 LuCI 里没用的「系统 → 插件」页
+#   8) 断言 PON / 光模块 / ONU 用户态包目录都在
 #
 set -e
 
@@ -52,16 +54,27 @@ fi
 ########################################
 # 1b) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
 #
-# 为什么改:
+# 为什么改（和流量统计是同一件事，不是两件事）:
 #   airoha_ppe_hw_init() 给 PPE_BIND_AGE1 写的 delta_tcp_fin 是 1(秒),
 #   delta_tcp 是 60(秒)。收到 FIN 的流由硬件按 delta_tcp_fin 老化,
 #   也就是"最后一个包之后约 1 秒"条目就从 PPE 表里消失。
-#   而设备流量采样器(/usr/sbin/cr-sampler.uc)是 1 秒一拍的整表 dump
-#   (/sys/kernel/debug/ppe/entries 单次约 300ms), 条目 FIN 后 0.2~1.0s
-#   就被回收 -> 秒级结束的大流量只能统计到一部分:
-#   实测同一批 3x9.7MB 下载, 统计精度在 14%~145% 之间抖。
-#   把 FIN 老化放到 30s, 条目多留一会儿, 1 秒采样能稳定命中终值,
-#   同一批下载的精度收敛到 ~104%(正好等于以太网/IP/TCP 头开销)。
+#
+#   报文一旦下到 PPE, 就不再经过 netfilter, conntrack 里的字节数只能靠驱动
+#   定期回写拿到:
+#     nf_flow_table → airoha_ppe_flow_offload_cmd(FLOW_CLS_STATS)
+#       → airoha_ppe_flow_offload_stats() → airoha_ppe_foe_entry_get_stats()
+#       → 读 npu->stats[index] 的增量, 累加进 flow 的 pkts/bytes
+#   FLOW_CLS_DESTROY（删条目）只 airoha_ppe_foe_flow_remove_entry(), 不取最后一次计数。
+#   所以条目一旦先被硬件回收, 下一次 FLOW_CLS_STATS 轮到这个 hash 时
+#   airoha_ppe_foe_get_flow_stats_index() 已经失败, 尾部这一截字节永久丢失。
+#
+#   秒级结束的大流量丢得最狠: 实测同一批 3x9.7MB 下载,
+#   统计精度在 14%~145% 之间抖。把 FIN 老化放到 30s,
+#   条目能活到下一次 stats 轮询之后再回收, 精度收敛到 ~104%(以太网/IP/TCP 头开销)。
+#
+# 怎么验证打进去了（寄存器在 airoha_ppe_hw_init() 里锁存，读回来就是实际生效值）:
+#   devmem 0x1FB50E40 32   →  0x001E003C  正确（0x1E=30 秒 FIN, 0x3C=60 秒 TCP）
+#   devmem 0x1FB50E40 32   →  0x0001003C  说明还是源码默认 1 秒，补丁没进内核
 #
 # 代价:
 #   已结束的连接在 PPE 表里多占 30 秒槽位。表有 16K 槽(4K SRAM + 12K DRAM),
@@ -208,7 +221,75 @@ echo "    ✅ root 密码已设为 ${ROOT_PASS}（$(printf '%s' "$HASH" | cut -c
 grep -m1 '^root:' "$SHADOW" | sed 's/^/       /'
 
 ########################################
-# 6) 关键包存在性检查（feeds 已 update）
+# 6) 关掉 apk 的签名要求
+#
+# apk(apk-tools 3) 默认只装签名能被 /etc/apk/keys/ 里公钥验证的包，
+# 装自己编的 / 第三方来源的 .apk 会直接报 UNTRUSTED signature。
+# 纯净版不引用仓库 files/，这里把配置写进 base-files，随固件出厂。
+# 选项在 apk 里是"无参数开关"，写成 allow-untrusted 才对；
+# 写成 allow-untrusted=yes 只会得到一条 warning 并被忽略。
+########################################
+echo "==== [diy-lite-p2] 关闭 apk 安装签名要求 ===="
+APK_CFG=package/base-files/files/etc/apk/config
+mkdir -p "$(dirname "$APK_CFG")"
+cat > "$APK_CFG" <<'EOF'
+# /etc/apk/config -- apk-tools 3 全局配置
+# allow-untrusted: 安装没有签名、或签名公钥不在 /etc/apk/keys/ 里的包时不再拒绝
+# （等价于每条 apk 命令都自带 --allow-untrusted）
+allow-untrusted
+EOF
+if grep -qx 'allow-untrusted' "$APK_CFG"; then
+  echo "    ✅ 已写入 $APK_CFG"
+else
+  echo "    ❌ 写入失败: $APK_CFG"; exit 1
+fi
+
+########################################
+# 7) 删掉 LuCI「系统 → 插件」页
+#
+# 这个页面来自 luci-mod-system 的 luci-plugins 框架，只会扫描
+# /www/luci-static/resources/view/plugins/*.js 里的插件定义；本仓库不用这套框架，
+# 那个目录一个插件都没有，点进去只有一张空表，整页删掉：
+#   1) 删视图 plugins.js   2) 删菜单项 admin/system/plugins
+########################################
+echo "==== [diy-lite-p2] 删除 系统→插件 页面 ===="
+PLG_JS=$(find feeds/luci -type f -path '*resources/view/system/plugins.js' 2>/dev/null | head -1)
+MENU_JS=$(find feeds/luci -type f -path '*menu.d/luci-mod-system.json' 2>/dev/null | head -1)
+if [ -n "$PLG_JS" ]; then
+  rm -f "$PLG_JS"
+  echo "    ✅ 已删除视图 $PLG_JS"
+else
+  echo "    ⚠️  未找到 plugins.js（luci 源结构变了？）"
+fi
+if [ -n "$MENU_JS" ]; then
+  cp "$MENU_JS" "$MENU_JS.orig"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$MENU_JS" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p, encoding='utf-8') as f:
+    d = json.load(f)
+d.pop('admin/system/plugins', None)
+with open(p, 'w', encoding='utf-8') as f:
+    json.dump(d, f, indent='\t', ensure_ascii=False)
+    f.write('\n')
+PY
+  else
+    TAB=$'\t'
+    sed -i "/\"admin\/system\/plugins\": {/,/^${TAB}},$/d" "$MENU_JS"
+  fi
+  if grep -q '"admin/system/plugins"' "$MENU_JS"; then
+    cp "$MENU_JS.orig" "$MENU_JS"
+    echo "    ❌ 菜单项删除失败，已回滚: $MENU_JS"; exit 1
+  fi
+  rm -f "$MENU_JS.orig"
+  echo "    ✅ 已移除菜单项 admin/system/plugins（$MENU_JS）"
+else
+  echo "    ⚠️  未找到 luci-mod-system.json"
+fi
+
+########################################
+# 8) 关键包存在性检查（feeds 已 update）
 ########################################
 echo "==== [diy-lite-p2] 关键包存在性检查 ===="
 fail=0

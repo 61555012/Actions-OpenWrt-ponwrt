@@ -1,5 +1,5 @@
 # 040G-MD 纯净版（PonWrt 源码）构建流水线
-# 与 build-040g-ponwrt-full.yml（标准版）、build-040g-lede-lite.yml（LEDE 纯净版）并列，互不影响
+# 与 build-040g-ponwrt-full.yml（标准版）并列，互不影响
 #
 # 目标源码: pbs05/ponwrt (master)
 # 机型:     Nokia XG-040G-MD (UBI) / airoha an7581
@@ -19,8 +19,8 @@
 #   ✓ 无 dummy 接口   ✓ 默认 root 密码 admin123
 #   ✗ argon 主题  ✗ OAF  ✗ mosdns v5  ✗ UPnP  ✗ NPU 面板  ✗ htop/nano  ✗ 仓库 files/ 覆盖层
 #
-# 与标准版 / LEDE 纯净版的产物区分:
-#   Release tag 前缀 ponwrt-lite-040g-md-（标准版是 040g-md-，LEDE 纯净版是 lede-lite-040g-md-）
+# 与标准版的产物区分:
+#   Release tag 前缀 ponwrt-lite-040g-md-（标准版是 040g-md-）
 # 工具链缓存与标准版共用同一个 key（toolchain-airoha-an7581-*），可直接复用已编好的工具链。
 #
 
