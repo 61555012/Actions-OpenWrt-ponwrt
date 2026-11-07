@@ -10,7 +10,28 @@ local traf = require "luci.oaf_traffic"
 --   2) 在线设备最近用过的应用（applist，fwx 自己按使用情况排好序）
 -- 前两条流条目信息最全（域名/端口/协议），保持原样不动。
 local ACTIVE_APP_MAX = 10
-local extra_cache, extra_cache_at = nil, 0
+local ACTIVE_HOST_MAX = 8       -- dashboard.htm 自己会 slice(0, 8)
+local HOST_MAX_AGE = 6 * 3600   -- 内核 SNI 表会留很久以前的条目，只补 6 小时内的
+local CACHE_TTL = 5             -- 仪表盘 3 秒刷一次，设备表 5 秒拉一次就够
+local users_cache, users_at = nil, 0
+
+-- 应用补齐和 URL 补设备名都要用 fwx 的设备表，统一在这一层做 5 秒缓存
+local function all_users(utl)
+	local now = os.time()
+	if users_cache and (now - users_at) < CACHE_TTL then
+		return users_cache
+	end
+	local resp = utl.ubus("fwx", "common", {
+		api = "get_all_users",
+		data = { flag = 3, page = 1, page_size = 200 }
+	})
+	local users = resp and resp.code == 2000 and resp.data and resp.data.list
+	if type(users) == "table" then
+		users_cache, users_at = users, now
+		return users
+	end
+	return users_cache or {}
+end
 
 -- 从设备表里抽出"现在在用 / 最近在用"的应用，按应用 id 去重
 local function device_apps(users, now)
@@ -61,21 +82,7 @@ local function fill_active_apps(utl, active_app)
 		list = {}
 		active_app.list = list
 	end
-	local now = os.time()
-	-- 这张卡片 3 秒刷一次，设备表没必要每轮都拉
-	if not extra_cache or (now - extra_cache_at) >= 5 then
-		local resp = utl.ubus("fwx", "common", {
-			api = "get_all_users",
-			data = { flag = 3, page = 1, page_size = 200 }
-		})
-		local users = resp and resp.code == 2000 and resp.data and resp.data.list
-		if type(users) == "table" then
-			extra_cache, extra_cache_at = device_apps(users, now), now
-		end
-	end
-	if not extra_cache then
-		return
-	end
+	local extra_cache = device_apps(all_users(utl), os.time())
 	for _, a in ipairs(extra_cache) do
 		if #list >= ACTIVE_APP_MAX then
 			break
@@ -91,6 +98,94 @@ local function fill_active_apps(utl, active_app)
 			list[#list + 1] = a
 		end
 	end
+end
+
+-- "活跃 URL" 卡片。fwx 的 active_host.list 只留一个很短的时间窗里新抓到的
+-- Host：实测 one.one.one.one 刚出现时返回 total=1，同一批抖音域名 40 分钟后
+-- 就被过滤成 total=0 / list=[]，get_all_users 里每个设备的 url 也全是空串。
+-- 但内核的 /proc/net/af_active_host 还留着这些 SNI（DPI 一直工作正常）。
+-- 开了硬件加速之后大量流量走长连接 / QUIC，新 SNI 出得非常慢，卡片就长期空白。
+-- 这里把内核表里 6 小时内的条目补进来，fwx 自己的新条目保持优先。
+local function bare_host(h)
+	local s = tostring(h.host or h.url or "")
+	s = s:gsub("^https?://", ""):gsub("^www%.", ""):gsub("[:/].*$", "")
+	return s:lower()
+end
+
+local function kernel_active_hosts(utl)
+	local f = io.open("/proc/net/af_active_host", "r")
+	if not f then
+		return {}
+	end
+	local names = {}
+	for _, u in ipairs(all_users(utl)) do
+		if u.mac and u.mac ~= "" then
+			names[u.mac:lower()] = (u.nickname and u.nickname ~= "" and u.nickname)
+				or u.hostname or ""
+		end
+	end
+	local now = os.time()
+	local out, seen = {}, {}
+	for line in f:lines() do
+		-- Host MAC SrcIP SrcPort DstIP DstPort Proto AppProto Drop LastUpdate
+		local host, mac, _, _, _, dport, _, app_proto, _, last = line:match(
+			"^(%S+)%s+(%S+)%s+(%S+)%s+(%d+)%s+(%S+)%s+(%d+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)")
+		local ts = tonumber(last)
+		local age = ts and (now - ts)
+		if host and mac and age and age >= -300 and age < HOST_MAX_AGE then
+			local key = mac:lower() .. "|" .. host:lower()
+			if not seen[key] then
+				seen[key] = true
+				local port = tonumber(dport) or 0
+				local ap = tonumber(app_proto) or 0
+				local scheme = (ap == 1 or port == 80) and "http" or "https"
+				local name = names[mac:lower()] or ""
+				out[#out + 1] = {
+					mac = mac:lower(),
+					name = name,
+					hostname = name,
+					host = host,
+					url = scheme .. "://" .. host,
+					app_proto = ap,
+					dst_port = port,
+					timestamp = ts
+				}
+			end
+		end
+	end
+	f:close()
+	table.sort(out, function(a, b) return a.timestamp > b.timestamp end)
+	while #out > ACTIVE_HOST_MAX do
+		table.remove(out)
+	end
+	return out
+end
+
+local function fill_active_hosts(utl, active_host)
+	if type(active_host) ~= "table" then
+		active_host = {}
+	end
+	local list = active_host.list
+	if type(list) ~= "table" then
+		list = {}
+	end
+	local seen = {}
+	for _, h in ipairs(list) do
+		seen[tostring(h.mac or ""):lower() .. "|" .. bare_host(h)] = true
+	end
+	for _, h in ipairs(kernel_active_hosts(utl)) do
+		if #list >= ACTIVE_HOST_MAX then
+			break
+		end
+		local key = h.mac .. "|" .. bare_host(h)
+		if not seen[key] then
+			seen[key] = true
+			list[#list + 1] = h
+		end
+	end
+	active_host.list = list
+	active_host.total = #list
+	return active_host
 end
 
 function index()
@@ -133,6 +228,7 @@ function get_dashboard_common()
 	end
 
 	fill_active_apps(utl, data.active_app)
+	data.active_host = fill_active_hosts(utl, data.active_host)
 
 	-- "today's traffic" on the card. The field is in KB and fwx only moves it
 	-- when a flow closes, so during a big transfer it stands still; offload
