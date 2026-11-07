@@ -24,7 +24,7 @@ files/                                         # 原样合并进固件根目录
   etc/apk/config                            # apk 信任配置：allow-untrusted
   www/luci-static/resources/oaf/app_icons/  # OAF 应用图标（562 个）
   www/luci-static/resources/oui/            # OUI 品牌库（vendors json + 44 个厂牌 svg，设备图标用）
-  usr/lib/lua/luci/view/oaf/                # 改过的 OAF 页面（dashboard / user_status / user_detail）
+  usr/lib/lua/luci/view/oaf/                # 改过的 OAF 页面（10 个，全部做过手机端适配）
   usr/lib/lua/luci/controller/oaf_*.lua     # 改过的控制器（oaf_user / oaf_dashboard）
   usr/lib/lua/luci/oaf_traffic.lua          # 流量聚合层
   usr/sbin/oaf-flowd + etc/init.d/oaf-flowd # 流量采集器（aarch64 静态二进制 + procd 服务）
@@ -153,6 +153,10 @@ apk add /tmp/x.apk              # 签名这道关卡不再拦
 | `usr/lib/lua/luci/view/oaf/user_status.htm` | 用户列表：OUI 品牌头像（`/luci-static/resources/oui/`）、v4/v6 双行流量、卡片结构指纹防闪烁 |
 | `usr/lib/lua/luci/view/oaf/user_detail.htm` | 设备详情：去掉 IPv6 行、移动端适配、24 列小时柱、页签内横向滚动 |
 | `usr/lib/lua/luci/view/oaf/app_record.htm` | 应用记录：手机上 9 列宽表改「一行一张卡」，字段名靠 `::before`（服务端渲染，跟语言走） |
+| `usr/lib/lua/luci/view/oaf/whitelist.htm` | 白名单：三个页签允许折行，5 列表格（原 `min-width:680px` 靠横向滚动）改卡片，MAC 提为标题、序号做右上角标 |
+| `usr/lib/lua/luci/view/oaf/app_filter/rules.htm` | 应用过滤规则：6 列表格改卡片；「添加规则」弹窗铺满屏 + 时段行竖排（原来整行溢出、弹窗底部出横向滚动条） |
+| `usr/lib/lua/luci/view/oaf/mac_filter/rules.htm` | 上网控制规则：5 列表格改卡片 + 同样的弹窗/时段行修正 |
+| `usr/lib/lua/luci/view/oaf/mac_filter/user.htm` | 上网控制的用户表（div 版表格，4 列）改卡片 + 三个弹窗铺满；注意上游控制器目前没有注册到这一页的路由，属预防性覆盖 |
 | `usr/lib/lua/luci/controller/oaf_user.lua` | 全量排序后再分页（跨页全局降序）、小时统计、上下线记录 |
 | `usr/lib/lua/luci/controller/oaf_dashboard.lua` | 首页聚合、按类型统计；「正在访问」「活跃 URL」两张卡保持上游原样（只有 `今日流量` 换成采集器口径） |
 | `usr/lib/lua/luci/oaf_traffic.lua` | 流量聚合层（读 `/tmp/oaf-flow/*.json`，按天/月/设备/应用切片） |
@@ -169,7 +173,25 @@ apk add /tmp/x.apk              # 签名这道关卡不再拦
 和 OAF 自己的统计口径不一致，所以**按上游默认还原**，不再二次加工。要恢复补数据，
 把 `oaf_dashboard.lua` 里 `fill_active_apps` / `fill_active_hosts` 两段加回去即可（见 git 历史）。
 
-### 4.5 时区：小时柱状图为什么会整体偏 8 格
+### 4.5 手机端怎么验（桌面浏览器上看不到的坑）
+
+OAF 的 10 个视图现在都带 `@media (max-width: 768px)`，手机上的统一手法是**宽表 → 一行一张卡**：
+表头 `display: none`，`tr` 改 `grid`，每个 `td` 前面用 `td:nth-child(n)::before { content: "<%:字段名%>" }` 补标题
+（用 `<%:...%>` 而不是 `data-label`，是因为标签由服务端渲染，会跟着界面语言切换）。
+
+验证时有两个坑：
+
+1. **浏览器工具改不了视口、也不吃 `file://`**。可靠办法是把一个外壳页放到设备 `/www/` 下，
+   用 `<iframe width="390">` 嵌真实页面 —— iframe 的内部视口就是 390，媒体查询按窄屏生效，
+   一个 1920 宽的截图能并排比 4 个页面，比逐个改窗口大小快得多。
+   外壳页必须和设备**同源**：LuCI 响应头带 `x-frame-options: SAMEORIGIN`，从 `localhost` 或 `file://` 嵌进去是白屏。
+2. **临时核对可以作弊**：把 `@media (max-width: 768px)` 全部替换成 `@media all`，1920 视口下也会走手机布局，
+   适合在真机页面上点开弹窗看溢出。**核对完必须换回 768px 再上传**，否则桌面端也变成卡片了。
+
+`_build/build_oaf_mobile.py`（开发机上）负责从设备原版重新生成这 5 个覆盖层页面，
+每次都从原版重建、断言原版里 `</style>` 只出现一次，避免重复注入。
+
+### 4.6 时区：小时柱状图为什么会整体偏 8 格
 
 这是最容易误判成「页面坏了」的一个坑。
 
