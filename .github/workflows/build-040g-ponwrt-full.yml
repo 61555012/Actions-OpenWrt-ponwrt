@@ -255,6 +255,7 @@ jobs:
         echo "----- files/ 叠加层 -----"
         for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow \
                  etc/config/mosdns etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
+                 etc/uci-defaults/99-ponwrt-time \
                  usr/lib/lua/luci/oaf_traffic.lua \
                  usr/lib/lua/luci/controller/oaf_user.lua \
                  usr/lib/lua/luci/controller/oaf_dashboard.lua \
@@ -275,6 +276,18 @@ jobs:
           echo "✅ OUI 品牌库 $(ls files/www/luci-static/resources/oui/*.svg 2>/dev/null | wc -l) 个厂牌图标"
         else
           echo "❌ files/ 缺少 OUI 品牌库（设备图标会全部退化成首字母）"; ok=0
+        fi
+        # mosdns 的 adblock 默认必须是关的：ad_source 为空时 adblock=1 会让 mosdns 起不来，
+        # 连带 dnsmasq 没有上游 → 全网 DNS 死 → NTP 用域名也校不回时间
+        if grep -q "option adblock '0'" files/etc/config/mosdns 2>/dev/null; then
+          echo "✅ mosdns adblock 默认关闭"
+        else
+          echo "❌ files/etc/config/mosdns 里 adblock 没关（无 ad_source 时会崩）"; ok=0
+        fi
+        if grep -q "203.107.6.88" files/etc/uci-defaults/99-ponwrt-time 2>/dev/null; then
+          echo "✅ 首启时区/NTP/adlist 兜底脚本就位"
+        else
+          echo "❌ files/etc/uci-defaults/99-ponwrt-time 缺失或没写 NTP IP"; ok=0
         fi
         # apk 必须关掉签名校验
         if grep -qx 'allow-untrusted' files/etc/apk/config 2>/dev/null; then

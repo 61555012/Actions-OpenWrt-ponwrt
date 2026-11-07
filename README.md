@@ -181,6 +181,36 @@ kmod 是内核模块，跟着本树 6.18 一起编，vermagic 自动对得上，
 
 `mosdns` 5.3.x 需要较新的 Go，而 immortalwrt/packages 里的 `lang/golang` 版本偏旧。`diy-ponwrt-full-2.sh` 在 `feeds update` 之后把 `feeds/packages/lang/golang` 整个换成 [sbwml/packages_lang_golang](https://github.com/sbwml/packages_lang_golang)：默认 `27.x`（Go 1.27.3），拉取失败自动回退 `26.x` → `25.x`。同时删掉源码树自带的 `net/mosdns`、`net/v2ray-geodata`（包名与 sbwml 版本重名会导致 duplicate package），改用 `sbwml/luci-app-mosdns v5` 整仓 + `sbwml/v2ray-geodata`；`diy-ponwrt-full-3.sh` 会再清一遍 `package/feeds` 下的悬空链接和同名残留。
 
+### 5.2 mosdns 的 adlist 空文件：一条配置把 DNS 和时间一起搞死
+
+`mosdns` 的配置生成器 `get_adlist()`（`/usr/share/mosdns/mosdns.uc`）**只在 `adblock != 1` 时**
+才 `writefile('/var/mosdns/disable-ads.txt', '')`；而 `adblock=1` 且 `ad_source` 为空时它返回空串，
+init 脚本的 fail-safe 于是把 adlist 指向这个**从未被创建**的文件：
+
+```
+failed to init plugin #11 adlist: /var/mosdns/disable-ads.txt: no such file or directory
+procd: Instance mosdns::mosdns in a crash loop 6 crashes
+```
+
+后果是链式的：`dnsmasq` 配的是 `noresolv=1` + `server=127.0.0.1#5335`，mosdns 起不来就等于
+**整个局域网没有 DNS**；而本机没有 RTC（`hwclock: can't open '/dev/rtc0'`），开机时钟取自
+`/etc` 最新文件的 mtime（≈刷机时间），NTP 的 peer 又全是域名 —— DNS 一死就永远校不回时间。
+实测这台机器就这么停在刷机那天（落后 14 天 12 小时），界面上所有时间、OAF 的「今日」全错。
+
+修法三处，互相兜底：
+
+1. **`files/etc/config/mosdns`**：`adblock '0'`。没有 `ad_source` 时它本来就不拦截任何东西，
+   开着只会崩。要开拦截必须**先**加 `ad_source`（`update_adlist` 才会真的落一份列表），
+   再把开关改回 `1`。
+2. **`files/etc/uci-defaults/99-ponwrt-time`**：首次启动兜底建 `/var/mosdns/disable-ads.txt`，
+   保证从旧固件升级上来（`/etc/config` 被保留、仍是 `adblock=1`）的机器也能起来。
+3. **同一个脚本**：时区 `CST-8` / `Asia/Shanghai`（出厂是 `GMT0`），NTP 服务器改成纯 IP
+   （`203.107.6.88`、`120.25.115.20`、`182.92.12.11`）—— 用域名的话，DNS 挂着的时候等于没配。
+
+> 2026-11 实测：`114.118.7.161/163`（国家授时中心）、`223.5.5.5`、`119.28.183.184` 都不回包；
+> busybox `ntpd` 没有 1000 s 的 step 上限，一步跳 14 天也能校正。
+> 根治还得等上游把 `get_adlist()` 改成 `adblock=1` 时也建空文件，那时第 2 条就可以删了。
+
 ### 6. argon 为什么要单独一个 diy-ponwrt-full-3
 
 feeds（immortalwrt/luci）里自带同名 `luci-theme-argon`。如果在 `feeds install` **之前**删掉 feeds 目录，install 会留下悬空链接/报错；所以放到 install **之后**：删 `package/feeds/luci/luci-theme-argon` 软链 → 删 `feeds/.../luci-theme-argon` 目录 → 克隆 v3.1.1 到 `package/luci-theme-argon`，并断言版本号是 3.x。

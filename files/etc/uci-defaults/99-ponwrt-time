@@ -1,0 +1,53 @@
+#!/bin/sh
+# 首次启动默认值 —— 时区 / NTP / mosdns adlist 兜底
+# 幂等：重复执行无副作用
+#
+# 背景（2026-11 实机排查结论，三条扣在一起会连锁故障）：
+#   本机没有 RTC，开机时的时钟来自 /etc 里最新文件的 mtime（≈刷机时间），
+#   只能靠 ntpd 一步跳回来；而 ntpd 的 peer 若是域名，DNS 一挂就永远校不回来。
+#   所以时区、NTP 地址、mosdns 的可启动性必须一起搞定。
+#
+
+#
+# 1) 时区：PonWrt 的 base-files 出厂是 GMT0/UTC，LuCI 上所有时间比本地慢 8 小时，
+#    OAF/统计的「今日」也会在北京时间 08:00 才翻页。
+#    时区值用 CST-8（不是 UTC+8），zonename 只给界面显示用。
+#
+uci -q set system.@system[0].timezone='CST-8'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q commit system
+
+#
+# 2) NTP 服务器一律写 IP，不写域名 —— 这条是给「DNS 挂了也要能把时间拉回来」兜底的。
+#    2026-11 实测：203.107.6.88 / 120.25.115.20 / 182.92.12.11 可用；
+#    114.118.7.161/163（国家授时中心）、223.5.5.5、119.28.183.184 不回包。
+#
+uci -q get system.ntp >/dev/null 2>&1 || uci -q set system.ntp='timeserver'
+uci -q set system.ntp.enabled='1'
+uci -q set system.ntp.enable_server='0'
+uci -q delete system.ntp.server
+uci -q add_list system.ntp.server='203.107.6.88'
+uci -q add_list system.ntp.server='120.25.115.20'
+uci -q add_list system.ntp.server='182.92.12.11'
+uci -q commit system
+
+#
+# 3) mosdns adlist 兜底：adblock=1 但 ad_source 为空时，generate_config 会把
+#    adlist 指向 /var/mosdns/disable-ads.txt 却不创建它 → mosdns 启动即 FATAL，
+#    procd 进 crash loop；而 dnsmasq 配的是 noresolv=1 + server=127.0.0.1#5335，
+#    上游一死全网 DNS 就没了（顺带把上面的 NTP 也饿死）。
+#    新版固件已把 adblock 默认关掉（见 files/etc/config/mosdns），
+#    这里再兜一遍，保证从旧固件升级上来的（/etc/config 被保留）也能起来。
+#
+if uci -q get mosdns.config >/dev/null 2>&1; then
+	mkdir -p /var/mosdns
+	[ -f /var/mosdns/disable-ads.txt ] || : > /var/mosdns/disable-ads.txt
+fi
+
+#
+# 4) 立即生效：/etc/TZ 与 /tmp/localtime 由 system 服务生成，ntpd 要重启才读新的 peer 列表
+#
+/etc/init.d/system reload >/dev/null 2>&1
+/etc/init.d/sysntpd restart >/dev/null 2>&1
+
+exit 0
