@@ -162,6 +162,40 @@ apk add /tmp/x.apk              # 签名这道关卡不再拦
 > 采集器的 Go 源码在开发机上（`oaf-flowd_src/`），这里入库的是编好的 aarch64 二进制；
 > 换内核/换架构后要重新 `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build` 再覆盖。
 
+### 4.5 时区：小时柱状图为什么会整体偏 8 格
+
+这是最容易误判成「页面坏了」的一个坑。
+
+OpenWrt 没有 zoneinfo 树：`/etc/localtime` 只是指向 `/tmp/TZ` 的软链，里面只有一行 POSIX 字符串
+（`CST-8`）。Go 的 `time.LoadLocation` 认不出这种字符串，`time.Local` 会**静默退回 UTC**。
+`oaf-flowd` 的 24 个小时桶是按 `time.Now().Hour()` 写的，于是：
+
+- 采集器按 **UTC** 分桶 → 北京时间 19:00 的流量被写进第 11 格；
+- 详情页「今日流量」/ 仪表盘 24 小时图横轴是 0–23 点，**柱子整体左移 8 格**；
+- 直观感受就是「早上的柱子堆在凌晨，现在这个时间段永远是空的」——看起来像没流量。
+
+采集器为此在 `main()` 第一行调用 `initTimeZone()`：先试 `$TZ`，再读 `/etc/TZ`、`/tmp/TZ`，
+最后回退 `uci get system.@system[0].timezone`，用 `parsePosixOffset()` 把 `CST-8` 解析成 +8 并
+`time.Local = time.FixedZone(...)`。
+
+两个必须知道的前提：
+
+1. **只在启动时读一次**。改完时区不重启 `oaf-flowd`，进程还是按老时区切桶。
+   `files/etc/uci-defaults/99-ponwrt-time` 已经把 `system.@system[0].{zonename,timezone}`
+   设成 `Asia/Shanghai` / `CST-8` 并 `/etc/init.d/system reload`（这一步才会写出 `/tmp/TZ`）；
+   两者顺序对了，采集器下次启动就能拿到 +8。反过来说，**手工改完 uci 不 reload 不重启，图上还是偏的**。
+2. **已经写错的历史桶不会自己归位**。`day.json`（含 `hours` 与每设备 `client_hours`）在进程内是
+   权威副本，**每秒整份重写**，所以「停服务 → 改文件 → 启服务」的顺序不能省，运行中改文件会被立刻覆盖。
+
+校正办法（右移 8 格，`new[i] = old[i-8]`，已经按本地时间写好的格子单独保留并合并）：
+
+```sh
+/etc/init.d/oaf-flowd stop            # 必须先停，否则文件会被内存副本覆盖
+# 编辑 /tmp/oaf-flow/day.json 与 /etc/oaf/data/day/YYYY-MM-DD.json：
+#   hours、client_hours[].hours 各右移 8 格（0..7 清零，总和保持不变）
+/etc/init.d/oaf-flowd start
+```
+
 ### 5. OAF 为什么要“先删再拉”
 
 PonWrt 主树本身不含 OAF（`feeds.conf.default` 只有 packages/luci/routing/telephony/video/pon_drivers/pon_userspace），`configs/an7581.config` 里那三行 `CONFIG_PACKAGE_kmod-oaf/appfilter/luci-app-appfilter` 是历史残留。但 feeds 或旧分支可能带一份旧版 OpenAppFilter，**用户态 `appfilter` 与 `kmod-oaf` 版本不匹配会直接 insmod 失败**。所以 `diy-ponwrt-full-2.sh` 按 S20P 的做法：

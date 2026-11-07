@@ -142,11 +142,8 @@
 		
 		document.getElementById('basic_info_mac').textContent = user.mac || '--';
 		document.getElementById('basic_info_ip').textContent = user.ip || '--';
-		var ipv6 = user.ipv6 || '';
-		if (!ipv6 || ipv6 === '::' || ipv6.trim() === '') {
-			ipv6 = '--';
-		}
-		document.getElementById('basic_info_ipv6').textContent = ipv6;
+		// 详情页不再显示 IPv6：设备通常同时持有多个临时地址（隐私地址会轮换），
+		// 这一格长期是“一排看不懂的地址”，对判断设备没有帮助。
 		current_nickname = (user.nickname || '').trim();
 		renderNicknameView(current_nickname);
 		document.getElementById('basic_info_hostname').textContent = user.hostname || '--';
@@ -1689,9 +1686,7 @@
 						</tr>
 						<tr class="tr">
 							<td class="td" style="font-weight: bold;"><%:IP Address%></td>
-							<td class="td" id="basic_info_ip">--</td>
-							<td class="td" style="font-weight: bold;"><%:IPv6%></td>
-							<td class="td" id="basic_info_ipv6">--</td>
+							<td class="td" id="basic_info_ip" colspan="3">--</td>
 						</tr>
 						<tr class="tr">
 							<td class="td" style="font-weight: bold;"><%:Today Internet Duration%></td>

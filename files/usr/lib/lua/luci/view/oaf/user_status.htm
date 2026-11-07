@@ -201,7 +201,11 @@
 								});
 							}
 						}
-						if (pageScrollY) window.scrollTo(pageScrollX, pageScrollY);
+						// 只有渲染真的把页面顶走了才纠正；每秒无条件 scrollTo 一次
+						// 会打断手机上正在进行的惯性滚动
+						if (pageScrollY && Math.abs(window.scrollY - pageScrollY) > 2) {
+							window.scrollTo(pageScrollX, pageScrollY);
+						}
 					}
 				}
 			);
@@ -890,6 +894,10 @@
 		// 是每秒上千次 jQuery 建节点 + HTML 解析。
 		var _devRenderCache = {};
 		var _renderReady = false;
+		// 卡片视图的“结构签名”：设备顺序 + 列数。只要它没变就一个节点都不动，
+		// 手机上整页滚动才不会因为每秒重建而塌高度、被弹回顶部。
+		var _cardStructSig = '';
+		var _cardDomMode = '';
 
 		function render_user_list(data) {
 			const $tb = $('#user_status_table');
@@ -902,15 +910,31 @@
 					$tb.find('tr:gt(0)').remove();
 					_renderReady = true;
 				}
-				// 卡片节点要复用：empty() 会把头像 <img> 一起丢掉，重新插回来时
-				// 移动端会闪一下。这里只把卡片 detach 下来（保留节点和解码结果），
-				// 下面按本轮顺序挂到新行里，行壳子再清掉。
-				$cards.children('.user-card-row').children('.user-card').detach();
-				$cards.children('.user-card-row').remove();
 				var seenDev = {};
 				var rowFrag = document.createDocumentFragment();
 				// 卡片视图才需要量宽度，列表视图不必触发一次强制布局
 				var cardLayout = view_mode === 'card' ? get_card_row_layout($cards) : null;
+				// 手机上 .user-status-content 的内滚动是关掉的（max-height:none），
+				// 滚动交给整页。原来每轮都把全部卡片 detach 再挂回去：那一瞬间
+				// 卡片容器高度塌成 0，浏览器顺手把 window.scrollY 夹回 0，
+				// 表现就是“滑不到底、每次刷新被弹回顶部”。
+				// 现在只有设备集合/顺序/列数真的变了才重排，平时一个节点都不动。
+				var cardViewSig = '';
+				if (view_mode === 'card' && cardLayout) {
+					var cardKeys = [];
+					for (var ci = 0; ci < user_list.length; ci++) {
+						cardKeys.push(user_list[ci].mac || ('#' + ci));
+					}
+					cardViewSig = cardLayout.columns + '|' + cardKeys.join(',');
+				}
+				var cardRebuild = view_mode === 'card' &&
+					(cardViewSig !== _cardStructSig || _cardDomMode !== 'card');
+				if (cardRebuild) {
+					$cards.children('.user-card-row').children('.user-card').detach();
+					$cards.children('.user-card-row').remove();
+				}
+				_cardStructSig = cardViewSig;
+				_cardDomMode = view_mode;
 				var cardIndex = 0;
 				var $cardRow = null;
 				for (var i = 0; i < user_list.length; i++) {
@@ -1191,11 +1215,15 @@
 							url: currentUrlText
 						});
 					}
-					if (cardIndex % cardLayout.columns === 0) {
-						$cardRow = $('<div class="user-card-row"></div>').css('max-width', cardLayout.rowWidth + 'px');
-						$cards.append($cardRow);
+					// 结构没变时卡片已经在 DOM 里了，再 append 一次反而会把它
+					// 先摘下来（高度瞬间塌陷），所以这里只在重排的轮次挂行
+					if (cardRebuild) {
+						if (cardIndex % cardLayout.columns === 0) {
+							$cardRow = $('<div class="user-card-row"></div>').css('max-width', cardLayout.rowWidth + 'px');
+							$cards.append($cardRow);
+						}
+						$cardRow.append($card);
 					}
-					$cardRow.append($card);
 					cardIndex++;
 					}  // end of card view build
 
