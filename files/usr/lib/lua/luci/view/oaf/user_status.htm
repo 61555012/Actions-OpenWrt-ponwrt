@@ -162,6 +162,39 @@
 
 		var _usersLoading = false, _usersLoadingAt = 0, _lastListKey = '';
 
+		// 页面里滚动的不一定只有一个容器：桌面端滚 .user-status-content，
+		// 手机上它的内滚动被关掉了，真正滚的是 LuCI 主题的外层容器
+		// （#maincontent 之类），再往上一层才轮到 window。只记 window.scrollY
+		// 的话，手机上重建 DOM 导致的高度塌陷没人兜，就表现为"滑不到底、
+		// 一秒后被弹回顶部"。所以这里把祖先链上所有能滚的容器都记一遍。
+		function captureScroll(root) {
+			var snaps = [];
+			var node = root || document.querySelector('.user-status-content');
+			while (node && node.nodeType === 1 && node !== document.body) {
+				if (node.scrollTop > 0 || node.scrollLeft > 0) {
+					snaps.push({ el: node, top: node.scrollTop, left: node.scrollLeft });
+				}
+				node = node.parentElement;
+			}
+			snaps.push({ el: null, top: window.scrollY, left: window.scrollX });
+			return snaps;
+		}
+
+		// 只在"位置被逼着往回缩"时纠正：重绘期间内容高度塌陷会把
+		// scrollTop 夹小，这是唯一的异常方向；惯性滚动只会让值变大，
+		// 所以不会打断用户正在进行的滑动。
+		function restoreScroll(snaps) {
+			for (var i = 0; i < snaps.length; i++) {
+				var snap = snaps[i];
+				if (snap.el) {
+					if (snap.el.scrollTop < snap.top - 1) snap.el.scrollTop = snap.top;
+					if (snap.el.scrollLeft !== snap.left) snap.el.scrollLeft = snap.left;
+				} else if (window.scrollY < snap.top - 1 || window.scrollX !== snap.left) {
+					window.scrollTo(snap.left, Math.max(snap.top, window.scrollY));
+				}
+			}
+		}
+
 		function getAllUsersData(page) {
 			// 1 秒一轮时上一轮还没回来就别再叠请求（后端偶尔会慢）；
 			// 万一回调丢了，5 秒后自动放行，不会把轮询卡死
@@ -171,11 +204,6 @@
 			new XHR().get("<%=url('admin/services/oaf/api/get_all_users')%>", {flag: 3, page: page, page_size: page_size},
 				function (x, data) {
 					_usersLoading = false;
-					var scrollContainer = document.querySelector('.user-status-content');
-					var scrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-					var scrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
-					var pageScrollX = window.scrollX;
-					var pageScrollY = window.scrollY;
 					user_list_data = data.data;
 					total_num = data.data.total_num || 0;
 					total_page = data.data.total_page || 1;
@@ -185,26 +213,14 @@
 					var listKey = JSON.stringify(user_list_data.list || []);
 					if (listKey !== _lastListKey) {
 						_lastListKey = listKey;
+						var snaps = captureScroll();
 						render_user_list(user_list_data);
 						render_pagination();
-						if (scrollContainer) {
-							scrollContainer.scrollTop = scrollTop;
-							scrollContainer.scrollLeft = scrollLeft;
-							// 重建期间高度是中间态，浏览器可能已经把
-							// scrollTop 夹小；等这一帧布局稳定再补一次，
-							// 否则滚到底看列表时会被一次次顶回顶部。
-							if (window.requestAnimationFrame) {
-								requestAnimationFrame(function() {
-									if (scrollContainer.scrollTop !== scrollTop) {
-										scrollContainer.scrollTop = scrollTop;
-									}
-								});
-							}
-						}
-						// 只有渲染真的把页面顶走了才纠正；每秒无条件 scrollTo 一次
-						// 会打断手机上正在进行的惯性滚动
-						if (pageScrollY && Math.abs(window.scrollY - pageScrollY) > 2) {
-							window.scrollTo(pageScrollX, pageScrollY);
+						restoreScroll(snaps);
+						// 重建那一瞬高度还是中间态，浏览器可能已经把 scrollTop
+						// 夹小；等这一帧布局稳定后再补一次才稳。
+						if (window.requestAnimationFrame) {
+							requestAnimationFrame(function() { restoreScroll(snaps); });
 						}
 					}
 				}
@@ -911,7 +927,11 @@
 					_renderReady = true;
 				}
 				var seenDev = {};
-				var rowFrag = document.createDocumentFragment();
+				// 这一轮要出现在表里的行，按设备顺序排。这里只是登记节点，
+				// 不再塞进 documentFragment：复用的行本来就该留在原位，
+				// 塞进 fragment 等于先把它从表里摘下来——整表高度那一刻
+				// 塌成只剩表头，浏览器顺手把 scrollTop 夹回 0。
+				var rowNodes = [];
 				// 卡片视图才需要量宽度，列表视图不必触发一次强制布局
 				var cardLayout = view_mode === 'card' ? get_card_row_layout($cards) : null;
 				// 手机上 .user-status-content 的内滚动是关掉的（max-height:none），
@@ -1103,9 +1123,9 @@
 							<button type="button" class="${blacklistClass}" onclick="toggleBlacklist('${user_list[i].mac}', ${inBlacklist ? 1 : 0})">${blacklistText}</button>
 						</td>
 					`);
-					// 先塞进文档片段，整个循环结束再一次性挂到表上：
-					// 17 次 append 就是 17 次重排，一次就够
-					rowFrag.appendChild($tr[0]);
+					// 新行此刻还是游离节点，复用行已经在表里；统一登记，
+					// 循环结束后按顺序就位（见下面的逐行 insertBefore）
+					rowNodes.push($tr[0]);
 
 					// 卡片只在卡片视图下才建：列表视图里这些卡片建完就是
 					// display:none，17 台设备每秒重建 17 张纯属白烧 CPU。
@@ -1236,21 +1256,19 @@
 						cardSig: view_mode === 'card' ? cardStructSig : null
 					};
 				}
-				// 一次性把这一轮的行挂上去（顺序即设备顺序）。顺序没变时
-				// 一个都不动：appendChild 会把节点先摘下来再插回去，每秒做
-				// 一遍等于让滚动容器的内容高度塌陷一次，浏览器顺手把
-				// scrollTop 夹回 0，就成了“滚到底自动跳回顶部”。
-				var desired = rowFrag.childNodes;
-				var sameOrder = $tb[0].children.length === desired.length + 1;
-				if (sameOrder) {
-					for (var k = 0; k < desired.length; k++) {
-						if ($tb[0].children[k + 1] !== desired[k]) {
-							sameOrder = false;
-							break;
-						}
+				// 逐行就位：位置本来就对的行一次 DOM 操作都不做，只有新行
+				// 或换了顺序的行才 insertBefore。原来是把所有行塞进
+				// fragment 再整体 append——那等于每秒把整张表摘空重建一遍，
+				// 高度塌陷 → scrollTop 被夹回 0 → 手机上「滑不到底、被弹回
+				// 顶部」。顺带也省掉每秒几十次节点搬动。
+				var tb = $tb[0];
+				for (var k = 0; k < rowNodes.length; k++) {
+					var want = rowNodes[k];
+					var cur = tb.children[k + 1];
+					if (cur !== want) {
+						tb.insertBefore(want, cur || null);
 					}
 				}
-				if (!sameOrder) $tb[0].appendChild(rowFrag);
 				// 设备下线/消失后把它的节点从 DOM 和缓存里一起清掉
 				for (var staleKey in _devRenderCache) {
 					if (!seenDev[staleKey]) {
@@ -2635,6 +2653,28 @@
 			width: 32px;
 			height: 32px;
 			border-radius: 8px;
+		}
+
+		/* 常用 APP 最多 6 个图标横排；原来超出宽度会折行，折出来的那个
+		   落到下一行、压住「正在访问 URL」，看着像颗飘着的图标 */
+		.user-card-line.user-card-apps {
+			flex-wrap: nowrap;
+		}
+
+		.user-card-apps .user-card-value {
+			display: flex;
+			flex-wrap: nowrap;
+			align-items: center;
+			justify-content: flex-end;
+			gap: 4px;
+			min-width: 0;
+			overflow: hidden;
+		}
+
+		.user-card-apps .user-card-value .user-app-icon-wrap,
+		.user-card-apps .user-card-value .user-app-icon-wrap + .user-app-icon-wrap {
+			margin: 0 !important;
+			flex: 0 0 auto;
 		}
 
 		.user-card-grid {

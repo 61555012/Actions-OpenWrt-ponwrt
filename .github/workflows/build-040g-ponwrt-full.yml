@@ -325,6 +325,7 @@ jobs:
                  usr/lib/lua/luci/view/oaf/dashboard.htm \
                  usr/lib/lua/luci/view/oaf/user_status.htm \
                  usr/lib/lua/luci/view/oaf/user_detail.htm \
+                 usr/lib/lua/luci/view/oaf/app_record.htm \
                  usr/sbin/oaf-flowd etc/init.d/oaf-flowd; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done

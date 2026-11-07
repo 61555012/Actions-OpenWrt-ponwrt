@@ -151,9 +151,10 @@ apk add /tmp/x.apk              # 签名这道关卡不再拦
 |---|---|
 | `usr/lib/lua/luci/view/oaf/dashboard.htm` | 仪表盘：卡片重排、移动端适配、图表 resize、分页不重绘/不滚顶 |
 | `usr/lib/lua/luci/view/oaf/user_status.htm` | 用户列表：OUI 品牌头像（`/luci-static/resources/oui/`）、v4/v6 双行流量、卡片结构指纹防闪烁 |
-| `usr/lib/lua/luci/view/oaf/user_detail.htm` | 设备详情：移动端适配、24 列小时柱、页签内横向滚动 |
+| `usr/lib/lua/luci/view/oaf/user_detail.htm` | 设备详情：去掉 IPv6 行、移动端适配、24 列小时柱、页签内横向滚动 |
+| `usr/lib/lua/luci/view/oaf/app_record.htm` | 应用记录：手机上 9 列宽表改「一行一张卡」，字段名靠 `::before`（服务端渲染，跟语言走） |
 | `usr/lib/lua/luci/controller/oaf_user.lua` | 全量排序后再分页（跨页全局降序）、小时统计、上下线记录 |
-| `usr/lib/lua/luci/controller/oaf_dashboard.lua` | 首页聚合、按类型统计、`device_apps` / 三路合并的「正在访问」 |
+| `usr/lib/lua/luci/controller/oaf_dashboard.lua` | 首页聚合、按类型统计；「正在访问」「活跃 URL」两张卡保持上游原样（只有 `今日流量` 换成采集器口径） |
 | `usr/lib/lua/luci/oaf_traffic.lua` | 流量聚合层（读 `/tmp/oaf-flow/*.json`，按天/月/设备/应用切片） |
 | `usr/sbin/oaf-flowd` | 采集器（aarch64 静态二进制）：netlink 订阅 conntrack destroy + `/proc/net/nf_conntrack` 全表扫描，按设备/小时/应用聚合，写 `/tmp/oaf-flow/{stats,hourly,day,mon}.json`，持久化到 `/etc/oaf/data/{day,mon}` |
 | `etc/init.d/oaf-flowd` | procd 服务（START=95，respawn） |
@@ -161,6 +162,12 @@ apk add /tmp/x.apk              # 签名这道关卡不再拦
 
 > 采集器的 Go 源码在开发机上（`oaf-flowd_src/`），这里入库的是编好的 aarch64 二进制；
 > 换内核/换架构后要重新 `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build` 再覆盖。
+
+**关于「正在访问」「活跃 URL」**：这两张卡的数据完全由 fwx 给，`active_app.list` / `active_host.list`
+就是「最近识别到的那条流」的快照，网络安静时会只剩一两条甚至空着（首页显示“暂无数据”）。
+之前试过用在线设备的 `applist`、以及内核 `/proc/net/af_active_host` 的 SNI 表去补，都会让卡片
+和 OAF 自己的统计口径不一致，所以**按上游默认还原**，不再二次加工。要恢复补数据，
+把 `oaf_dashboard.lua` 里 `fill_active_apps` / `fill_active_hosts` 两段加回去即可（见 git 历史）。
 
 ### 4.5 时区：小时柱状图为什么会整体偏 8 格
 
