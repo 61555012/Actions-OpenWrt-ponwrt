@@ -63,26 +63,71 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Initialization environment (disk cleanup)
       run: |
         # runner 只有 73G 磁盘, 编译期必然吃满; 先把镜像里用不到的大件清干净
         # (android sdk / dotnet / ghc / hostedtoolcache / boost / swift / ghcup / docker 镜像)
+        # 正常 20~60 秒; docker prune 卡住就放弃, 它只是省磁盘, 不影响编译
+        t0=$(date +%s)
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                     /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
                     /opt/microsoft /usr/local/lib/node_modules /opt/az /usr/local/aws-cli || true
-        sudo docker image prune --all --force
-        sudo docker system prune -af --volumes || true
+        timeout 300 sudo docker image prune --all --force || echo "::warning::docker image prune 超时/失败, 跳过"
+        timeout 300 sudo docker system prune -af --volumes || echo "::warning::docker system prune 超时/失败, 跳过"
         sudo rm -rf /var/lib/apt/lists/*
-        echo "----- 清理后磁盘 -----"; df -hT /
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
+        echo "清理耗时 $(( $(date +%s) - t0 ))s"; df -hT /
+
+    - name: Initialization environment (apt)
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # ---- 为什么把 apt 拆成独立一步: ----
+        # run 42246988282 总耗时 3h35m, 其中编译只占 55 分钟, 剩下 2h36m 全挂在
+        # 这个初始化步骤里 —— 而这一步根本看不出停在哪: 原来是一条
+        #   apt-get -qq install <90 个包>
+        # -qq 把下载进度全部吞掉, 卡住时日志一行都不涨, 只能干等到 job 超时。
+        # 另外 runner 镜像本来就预装了其中大部分, 原写法等于每次重下几百 MB。
+        # 现在: 先 dpkg 探测跳过已装的, 加 --no-install-recommends, 每条网络命令都套 timeout。
+        t0=$(date +%s)
+        PKGS="ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd"
+        MISSING=""
+        for p in $PKGS; do
+          dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || MISSING="$MISSING $p"
+        done
+        CNT_ALL=$(echo $PKGS | wc -w); CNT_MISS=$(echo $MISSING | wc -w)
+        echo "apt: 共 $CNT_ALL 个, 镜像已装 $((CNT_ALL-CNT_MISS)) 个, 待装 $CNT_MISS 个:$MISSING"
+        if [ "$CNT_MISS" -gt 0 ]; then
+          # update 正常 30~60 秒, 给 10 分钟上限
+          timeout 600 sudo -E apt-get -qq update \
+            || echo "::warning::apt-get update 超时或失败, 继续尝试 install"
+          # 先确认有安装候选: 名字不存在会让整批 install 直接非 0 退出, 连带其它包一个都装不上
+          OK=""
+          for p in $MISSING; do
+            if apt-cache show "$p" >/dev/null 2>&1; then OK="$OK $p"; else echo "::warning::$p 无安装候选, 跳过"; fi
+          done
+          if [ -n "$OK" ]; then
+            # 几百 MB 正常 2~4 分钟, 给 20 分钟上限
+            timeout 1200 sudo -E apt-get -qq install -y --no-install-recommends \
+                -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+                -o Dpkg::Options::=--force-confnew $OK \
+              || echo "::warning::批量安装未正常结束, 下面逐个补装"
+            # 逐个补: 批量中断时 apt 可能一个都没落地
+            for p in $OK; do
+              dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" && continue
+              timeout 300 sudo -E apt-get -qq install -y --no-install-recommends "$p" \
+                || echo "::warning::$p 安装失败, 编译期若报缺再补"
+            done
+          fi
+        fi
+        sudo -E apt-get -qq clean || true
+        echo "apt 耗时 $(( $(date +%s) - t0 ))s"
+
+    - name: Initialization environment (timezone / workdir)
+      run: |
+        sudo timedatectl set-timezone "$TZ" || echo "::warning::设置时区失败"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+        df -hT / | tail -1
 
     - name: Clone source code
       working-directory: /workdir
