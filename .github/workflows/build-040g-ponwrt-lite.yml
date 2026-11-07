@@ -81,7 +81,9 @@ jobs:
         # OOM killer 一旦连 Runner.Listener 一起杀掉, job 直接 lost communication,
         # 合并日志 blob 和 ccache 的 post-save 也全都不会发生 —— 于是下一次
         # 又得全量重编 120 分钟, 形成死循环。
-        SWP=/swapfile
+        # 用独立文件名, 绝不碰 runner 镜像可能自带的 /swapfile:
+        # 对正在使用的 swapfile 执行 mkswap 会重写其头部, 有破坏风险。
+        SWP=/swapfile-wb
         sudo fallocate -l 6G "$SWP" 2>/dev/null || true
         if [ -f "$SWP" ]; then
           sudo chmod 600 "$SWP"
