@@ -480,17 +480,40 @@ jobs:
         echo "$(nproc) thread compile"
         df -hT /
         # 原写法 make -j || make -j1 || make -j1 V=s: 磁盘写满时也会重试两次, 白耗十几分钟
+        echo "起始资源:"; free -m | head -2; df -hT / | tail -1
+        # run 42329431482: 编译到 ~120 分钟时 hosted runner 直接失联, 该步骤永远
+        # 停在 in_progress, 连日志 blob 都没上传 (API 下载报 BlobNotFound), 产物 0 个。
+        # 原写法 make ... 2>&1 | tee 把几十万行编译输出实时灌进 Actions 日志流,
+        # runner 要一直扛日志上传。现在只写文件, 前台改用 60s 心跳保持输出,
+        # 同时留下内存/磁盘曲线 —— 再掉线就能区分是 OOM 还是磁盘写满。
         set +e
-        make -j$(nproc) 2>&1 | tee /tmp/build.log
-        rc=${PIPESTATUS[0]}
+        make -j$(nproc) > /tmp/build.log 2>&1 &
+        mkpid=$!
+        while kill -0 "$mkpid" 2>/dev/null; do
+          sleep 60 || true
+          mem=$(free -m | awk 'NR==2{print $3"/"$2" MB used"}')
+          disk=$(df -h / | awk 'NR==2{print $3"/"$2" used"}')
+          last=$(tail -1 /tmp/build.log | cut -c1-90)
+          echo "[$(date +%H:%M:%S)] building | log $(wc -l < /tmp/build.log) 行 | mem $mem | disk $disk | $last"
+          avail=$(df -m / | awk 'NR==2{print $4}')
+          if [ -n "$avail" ] && [ "$avail" -lt 2048 ]; then
+            echo "::error::磁盘剩余 ${avail}MB, 主动终止编译, 避免 runner 被写爆后连日志都传不回来"
+            kill "$mkpid" 2>/dev/null || true
+            break
+          fi
+        done
+        wait "$mkpid"
+        rc=$?
         set -e
+        echo "make 退出码 $rc, 编译日志 $(wc -l < /tmp/build.log) 行"
+        tail -25 /tmp/build.log || true
         if [ "$rc" -ne 0 ]; then
           if grep -qE 'No space left on device|running out of disk space' /tmp/build.log; then
             echo "::error::磁盘写满 (ENOSPC), 编译中断; 重试只会继续失败"
             df -hT /
             exit 1
           fi
-          # -j 的 trace 输出会把真正的错误行淹掉、甚至不落盘, 必须 -j1 V=s 重跑才拿得到原因。
+          # -j 的 trace 输出会把真正的错误行淹掉, 必须 -j1 V=s 重跑才拿得到原因。
           # 重跑只补做失败的那几个包 (stamp 都在), 一般几分钟, 不会重来两小时。
           echo "::warning::首次编译失败 (非磁盘原因), 用 -j1 V=s 抓详细错误"
           set +e
@@ -500,6 +523,9 @@ jobs:
         fi
         if [ "$rc" -ne 0 ]; then
           echo "::error::编译失败"
+          echo "===== 资源 ====="
+          free -m | head -2 || true
+          df -hT / || true
           echo "===== 关键错误行 ====="
           grep -nE '(^|[[:space:]])(ERROR:|Error [0-9]+|error:|\*\*\* |No such file|Cannot |undefined reference|command not found)' /tmp/build2.log 2>/dev/null | tail -50 || true
           echo "===== 失败包上下文 ====="
