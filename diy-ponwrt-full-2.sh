@@ -7,7 +7,8 @@
 #   - 必须在 feeds install -a 之前: 内核补丁与 target 配置要在内核解包前写好，
 #     install 之后再改会留下不一致的索引/软链
 #
-# 本脚本做 6 件事:
+# 本脚本做 7 件事:
+#   0) 拉 OpenAppFilter 源码：保留 oaf.ko(kmod-oaf) + oafd(appfilter)，删除 luci-app-oaf 界面
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
 #   2) 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
 #   3) 检查 kmod-nf-conntrack-bridge（L2 桥接加速前置）
@@ -26,6 +27,32 @@ elif [ -f openwrt/feeds.conf.default ]; then
   echo "进入源码树: $(pwd)"
 else
   echo "❌ 找不到 openwrt 源码树 (feeds.conf.default)"; exit 1
+fi
+
+########################################
+# 0) OAF 识别内核: oaf.ko(kmod-oaf) + oafd(appfilter)
+#
+# 「状态 → 用户列表」的两块数据靠这里，缺了页面照开但内容为空：
+#   oaf/Makefile             -> KernelPackage/oaf      => kmod-oaf
+#   open-app-filter/Makefile -> Package/appfilter      => oafd + 特征库 + init
+#   luci-app-oaf             -> 官方管理界面，自研插件已完全替代，必须删掉，
+#                               否则侧边栏会多出第二套重复菜单
+#
+# 时机: 必须在 feeds update -a 之后、feeds install -a 之前。
+#   - 之后: 否则 packages feed 更新时会把同名目录重新拉回来覆盖
+#   - 之前: 否则 feeds install 会留下指向旧目录的软链, 编译期找不到 Makefile
+########################################
+echo "==== [diy-part2] OAF 识别内核: 只留 oaf.ko + open-app-filter, 删除 luci-app-oaf 界面 ===="
+find . -type d \( -name "OpenAppFilter" -o -name "luci-app-oaf" -o -name "open-app-filter" \) \
+	-exec rm -rf {} + 2>/dev/null || true
+rm -rf package/feeds/*/luci-app-oaf package/feeds/*/OpenAppFilter
+git clone --depth 1 https://github.com/destan19/OpenAppFilter package/OpenAppFilter
+rm -rf package/OpenAppFilter/luci-app-oaf
+if [ -f package/OpenAppFilter/oaf/Makefile ] && [ -f package/OpenAppFilter/open-app-filter/Makefile ]; then
+  echo "    ✅ 已就位: $(ls package/OpenAppFilter | tr '\n' ' ')"
+  echo "       oaf.ko 由内核树编译（an7581 当前 6.18），appfilter 依赖 libuci-lua/sqlite3/curl"
+else
+  echo "    ❌ OpenAppFilter 克隆不完整（网络问题？检查 github 连通性）"; exit 1
 fi
 
 ########################################

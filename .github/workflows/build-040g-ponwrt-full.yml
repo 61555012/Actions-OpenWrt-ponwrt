@@ -15,7 +15,11 @@
 #   - 2.5G 网口: kmod-phy-airoha-en8811h + airoha-en8811h-firmware，强制 =y（lan1 2500base-x）
 #   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
 #   - UPnP: miniupnpd-nftables + luci-app-upnp
-#   - 不编入 OAF 应用识别、mosdns 分流（含 Go 工具链），.config 里显式 is not set
+#   - OAF 识别内核保留：kmod-oaf(oaf.ko) + appfilter(oafd + 特征库)。
+#     「状态-用户列表」(oaf_status) 是独立 Lua 插件，靠 luci-compat + ucode-mod-lua 跑，
+#     它的 APP 名 / 访问记录 / APP 时长唯一数据源就是 oafd；
+#     但官方 luci-app-oaf 界面不编入（diy-part2 删掉，自研插件已替代，避免重复菜单）。
+#   - mosdns 分流不编入（含 Go 工具链与 v2ray-geodata）。
 #   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
 #   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
 #
@@ -189,6 +193,10 @@ jobs:
       run: |
         mkdir -p openwrt/files
         if [ -d files ]; then cp -a files/. openwrt/files/ && echo "files/ 已合并进 openwrt/files ($(find openwrt/files -type f | wc -l) 个文件)"; fi
+        # Windows 上 core.fileMode=false，checkout 出来的脚本/二进制可能没有执行位；
+        # 这里统一补齐，否则固件里 /etc/init.d/oaf-flowd 和采样器都不可执行。
+        chmod 755 openwrt/files/usr/sbin/oaf-flowd openwrt/files/etc/init.d/oaf-flowd 2>/dev/null || true
+        chmod 755 openwrt/files/etc/uci-defaults/* 2>/dev/null || true
         cd openwrt
         # 1) 官方基线: ponwrt 自带 configs/an7581.config + configs/release.config
         #    （含 UBIFS / initramfs / squashfs / 内核参数等镜像级设置，手写种子缺失会编出不能启动的镜像）
@@ -279,6 +287,29 @@ jobs:
         need CONFIG_PACKAGE_luci-app-airoha-npu
         need CONFIG_PACKAGE_luci-app-onu
         need CONFIG_PACKAGE_luci-app-pon-status
+        echo "----- 状态-用户列表(oaf_status) 的 Lua 运行时 -----"
+        # files/ 里的 oaf_status 是 Lua 版插件（controller/model.cbi/view.htm）。
+        # 缺下面任一包，页面会 404 或整棵页面树构建失败（lua bridge 报错）。
+        need CONFIG_PACKAGE_luci-compat
+        need CONFIG_PACKAGE_ucode-mod-lua
+        need CONFIG_PACKAGE_luci-lib-jsonc
+        need CONFIG_PACKAGE_luci-lib-nixio
+        echo "----- 状态-用户列表(oaf_status) 的 OAF 识别内核 -----"
+        # kmod-oaf 写 conntrack 应用标记、导出 /proc/net/af_*；
+        # appfilter 提供 oafd + 特征库 + /etc/init.d/appfilter，维护 /tmp/oaf/client.db。
+        # 缺这两个，用户列表只剩流量，APP 名与访问记录全空。
+        need CONFIG_PACKAGE_kmod-oaf
+        need CONFIG_PACKAGE_appfilter
+        need CONFIG_PACKAGE_libuci-lua
+        # 源码目录必须在（diy-part2 从 destan19/OpenAppFilter 克隆）
+        for d in package/OpenAppFilter/oaf package/OpenAppFilter/open-app-filter; do
+          if [ -f "$d/Makefile" ]; then echo "✅ $d"; else echo "❌ 缺少 $d"; ok=0; fi
+        done
+        if [ -d package/OpenAppFilter/luci-app-oaf ]; then
+          echo "❌ luci-app-oaf 界面未删除（会和自研插件菜单重复）"; ok=0
+        else
+          echo "✅ luci-app-oaf 界面已删除"
+        fi
         echo "----- UPnP -----"
         need CONFIG_PACKAGE_luci-app-upnp
         need CONFIG_PACKAGE_miniupnpd-nftables
@@ -287,8 +318,7 @@ jobs:
           if grep -qE "^$1=[ym]$" .config; then echo "❌ $1 仍被选中"; ok=0;
           else echo "✅ $1 未编入"; fi
         }
-        for sym in CONFIG_PACKAGE_kmod-oaf CONFIG_PACKAGE_appfilter \
-                   CONFIG_PACKAGE_luci-app-oaf CONFIG_PACKAGE_luci-app-appfilter \
+        for sym in CONFIG_PACKAGE_luci-app-oaf CONFIG_PACKAGE_luci-app-appfilter \
                    CONFIG_PACKAGE_mosdns CONFIG_PACKAGE_luci-app-mosdns \
                    CONFIG_PACKAGE_geo2txt CONFIG_PACKAGE_v2ray-geoip \
                    CONFIG_PACKAGE_v2ray-geosite; do
@@ -311,6 +341,38 @@ jobs:
           echo "✅ OMCC 版本默认 0x86"
         else
           echo "❌ files/etc/config/pon 里 omcc_version 不是 0x86"; ok=0
+        fi
+        echo "----- 状态-用户列表 (oaf_status)：前端 / 后端 / OUI / 采样器 -----"
+        for f in usr/lib/lua/luci/controller/oaf_status_users.lua \
+                 usr/lib/lua/luci/model/cbi/oaf_status/user_list.lua \
+                 usr/lib/lua/luci/model/cbi/oaf_status/user_detail.lua \
+                 usr/lib/lua/luci/view/oaf_status/user_list.htm \
+                 usr/lib/lua/luci/view/oaf_status/user_detail.htm \
+                 usr/lib/lua/luci/oaf_traffic.lua \
+                 usr/lib/lua/luci/oaf_app_names.lua \
+                 usr/lib/lua/luci/i18n/oaf_status.zh-cn.lmo \
+                 etc/init.d/oaf-flowd etc/uci-defaults/99-oaf-status-defaults \
+                 usr/sbin/oaf-flowd usr/share/oaf_status/vendors.json \
+                 www/luci-static/resources/oaf_status/oaf_icon.js \
+                 www/luci-static/resources/oaf_status/common.js \
+                 www/luci-static/resources/oaf_status/echarts.min.js \
+                 www/luci-static/resources/oui/oui.js; do
+          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
+        done
+        # 采样器必须是本机架构的静态 ELF（aarch64 → e_machine 在偏移 18，小端 b7 00）
+        if [ -x files/usr/sbin/oaf-flowd ] &&
+           [ "$(head -c20 files/usr/sbin/oaf-flowd | tail -c2 | od -An -tx1 | tr -d ' \n')" = "b700" ]; then
+          echo "✅ oaf-flowd 是 aarch64 ELF"
+        else
+          echo "❌ oaf-flowd 不是可执行的 aarch64 ELF"; ok=0
+        fi
+        # OUI 厂商库 + 应用图标（缺了列表就只剩 MAC）
+        oui_json=$(ls files/www/luci-static/resources/oui/vendors-*.json 2>/dev/null | wc -l)
+        icons=$(ls files/www/luci-static/resources/oaf_status/app_icons/*.png 2>/dev/null | wc -l)
+        if [ "$oui_json" -ge 1 ] && [ "$icons" -ge 500 ]; then
+          echo "✅ OUI 库 $oui_json 个 + 应用图标 $icons 个"
+        else
+          echo "❌ OUI 库/应用图标缺失 (oui=$oui_json icons=$icons)"; ok=0
         fi
         # 实时 CPU 占用：rpcd 的 ucode 脚本 + overview 前端（两者必须同时存在，
         # 只改后端则数字不刷新，只改前端则首屏拿不到值）

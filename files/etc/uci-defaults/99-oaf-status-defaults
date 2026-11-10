@@ -1,0 +1,23 @@
+#!/bin/sh
+# oaf-status（用户列表插件）默认设置
+# 固件首次启动时执行一次（files/ 合并后 init.d 已就位）。
+
+# 1) 统计目录预建。
+#    oaf-flowd 只往已存在的 day/ mon/ 里写文件，不会自建；
+#    目录缺了它照跑，但只在内存里计数、一个字节都不落盘（历史/月流量永远 0）。
+#    init 脚本已经每次启动都 mkdir，这里再建一次是给「首启时 init 还没跑」兜底。
+mkdir -p /etc/oaf/data/day /etc/oaf/data/mon /tmp/oaf
+
+# 2) oaf-flowd 采样器默认开机自启
+if [ -x /etc/init.d/oaf-flowd ]; then
+	/etc/init.d/oaf-flowd enable
+fi
+
+# 3) 关于硬件加速的连接计数回写（这里曾经写过 turboacc 分支，已删除）
+#    turboacc 是 MediaTek(HNAT) 机型的加速插件，靠 fastpath_mh_update_nfct
+#    定时把硬件卸载流的字节数刷回 conntrack；不打这个补丁，用户列表的流量
+#    统计会少算 95% 以上。
+#    本机是 Airoha AN7581，没有 turboacc，也不用它：加速走 fw4 flowtable +
+#    PPE，内核侧已把 PPE TCP_FIN 老化从 1s 放宽到 30s（见 diy-part2 的补丁），
+#    保证条目活到下一次 stats 轮询之后，尾部字节能回写到 conntrack。
+#    所以这一段在这里是死代码，删掉以免在 Airoha 上凭空造一份 turboacc 配置。

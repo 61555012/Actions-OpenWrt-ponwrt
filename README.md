@@ -3,10 +3,22 @@
 用 GitHub Actions 云编译 **Nokia XG-040G-MD (UBI)**（`airoha/an7581`，内核 6.18）固件。
 源码树是 [pbs05/ponwrt](https://github.com/pbs05/ponwrt) `master`，仓库里只保留**一条**标准版流水线。
 
-> 2026-11 清理：OAF 应用识别（前端页面 / 控制器 / 流量采集器 / 特性库 / OUI 品牌库 / 应用图标）、
-> mosdns 分流（含 Go 工具链与 v2ray-geodata）、以及整条「纯净版 / Lite」编译链路都已删除。
+> 2026-11 清理：mosdns 分流（含 Go 工具链与 v2ray-geodata）、OAF 的 **LuCI 界面**
+> （`luci-app-oaf`：前端页面 / 控制器）、以及整条「纯净版 / Lite」编译链路都已删除。
 > 这些包在 `.config-ponwrt-full` 里显式写成 `is not set`，工作流编译前还有 `absent()` 断言，
 > 不会被官方基线或 feeds 默认值带回来。
+>
+> 2026-11 新增：「状态 → 用户列表」(`oaf_status`)。这是自建插件（从 S20P 机型整包搬来），
+> 与上面那个第三方 `luci-app-oaf` 界面无关，包含 Lua 版 controller/CBI/view、`oaf-flowd` 采样器、
+> OUI 厂商库与 562 个应用图标。PonWrt 本身是纯 ucode 版 LuCI，没有 Lua 解释器，所以
+> `.config-ponwrt-full` 里重新打开了 `luci-compat` / `luci-lib-jsonc` / `luci-lib-nixio` /
+> `ucode-mod-lua` —— 少任何一个，页面都会 404 或整棵页面树构建失败。
+>
+> 2026-11 补齐：**OAF 识别内核** `kmod-oaf` + `appfilter`（`oafd`）。这是用户列表里
+> APP 名称、访问记录、APP 时长的唯一数据源：`oaf.ko` 在 conntrack 写应用标记并导出
+> `/proc/net/af_*`，`oafd` 维护 `/tmp/oaf/client.db`，`oaf-flowd` 再从这份库滚动出 30 天访问历史。
+> 只装内核和守护，`luci-app-oaf` 界面仍然删掉（diy-part2 里 `rm -rf`），否则会出现第二套重复菜单。
+> 统计目录固定为 overlay 的 `/etc/oaf/data`，**不再使用任何 `/mnt/mmcblk*` 外挂分区**。
 
 ## 目录
 
@@ -23,6 +35,15 @@ files/                                         # 原样合并进固件根目录
   etc/internet.nft / etc/iptv.nft            # wanup / IPTV 桥接规则（firewall include 引用）
   etc/apk/config                             # apk 信任配置：allow-untrusted
   etc/uci-defaults/99-040g-md                # 首启：加速开关 / 去 dummy / 主题 / OMCC 版本
+  etc/uci-defaults/99-oaf-status-defaults    # 首启：预建统计目录 + 启用采样器
+  etc/init.d/oaf-flowd                       # 采样器 procd 服务（每次拉起重建 day/ mon/）
+  usr/sbin/oaf-flowd                         # 用户列表采样器（aarch64 静态 ELF）
+  usr/lib/lua/luci/controller/oaf_status_users.lua   # 用户列表/详情路由 + 全部 API
+  usr/lib/lua/luci/{model/cbi,view}/oaf_status/*     # 列表页与详情页
+  usr/lib/lua/luci/oaf_traffic.lua           # 采样器快照合并（V4/V6 分行、厂商名）
+  usr/share/oaf_status/vendors.json          # OUI 厂商库
+  www/luci-static/resources/oaf_status/      # 前端资源（jquery / echarts / 562 个应用图标）
+  www/luci-static/resources/oui/             # OUI 品牌图标库
   usr/share/rpcd/ucode/luci                  # getCPUUsage 改为实时采样（扣除采样器自身占用）
   www/luci-static/resources/view/status/include/10_system.js  # overview 的 CPU 行 3 秒轮询
 ```
