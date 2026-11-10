@@ -3,20 +3,17 @@
 # diy-ponwrt-full-2.sh —— 在 feeds update 之后、feeds install 之前执行
 #
 # 执行时机很关键（参考 Actions-OpenWrt-S20P 的做法）:
-#   - 必须在 feeds update -a 之后: 否则 packages feed 会把 lang/golang 目录重新拉回覆盖
-#   - 必须在 feeds install -a 之前: 否则删掉源码树里的 OAF/mosdns 会留下 package/feeds 下的旧链接
+#   - 必须在 feeds update -a 之后: 否则 packages feed 会把上游目录重新拉回覆盖
+#   - 必须在 feeds install -a 之前: 内核补丁与 target 配置要在内核解包前写好，
+#     install 之后再改会留下不一致的索引/软链
 #
-# 本脚本做 10 件事:
+# 本脚本做 6 件事:
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
-#   2) 检查 kmod-nf-conntrack-bridge（L2 桥接加速前置）
-#   3) Go 工具链换成 sbwml/packages_lang_golang 最新分支（默认 27.x = Go 1.27.3）
-#   4) 清理源码/feeds 里自带的 mosdns、v2ray-geodata
-#   5) 删除源码/feeds 里自带的 OAF，重新拉 destan19/OpenAppFilter 最新版
-#   6) luci-app-airoha-npu (luanmuc)：NPU/CPU/FrameEngine/PPE 状态面板
-#   7) mosdns v5（sbwml/luci-app-mosdns v5，含本体 + LuCI + geo2txt）
-#   8) 去除 dummy 接口
-#   9) 断言 PON / 光模块 / 2.5G / 插件目录都在
-#  10) 删掉 LuCI 里没用的「系统 → 插件」页（视图 + 菜单项）
+#   2) 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
+#   3) 检查 kmod-nf-conntrack-bridge（L2 桥接加速前置）
+#   4) luci-app-airoha-npu (luanmuc)：NPU/CPU/FrameEngine/PPE 状态面板
+#   5) 去除 dummy 接口
+#   6) 关键包存在性检查 + 删掉 LuCI 里没用的「系统 → 插件」页
 #
 set -e
 
@@ -52,7 +49,7 @@ else
 fi
 
 ########################################
-# 1b) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
+# 2) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
 #
 # 为什么改（和流量统计是同一件事，不是两件事）:
 #   airoha_ppe_hw_init() 给 PPE_BIND_AGE1 写的 delta_tcp_fin 是 1(秒),
@@ -67,13 +64,9 @@ fi
 #   FLOW_CLS_DESTROY（删条目）只 airoha_ppe_foe_flow_remove_entry(), 不取最后一次计数。
 #   所以条目一旦先被硬件回收, 下一次 FLOW_CLS_STATS 轮到这个 hash 时
 #   airoha_ppe_foe_get_flow_stats_index() 已经失败, 尾部这一截字节永久丢失。
-#
-#   /usr/sbin/oaf-flowd（本仓库的采集器）读的正是 conntrack 计数器
-#   （netlink destroy 事件 + /proc/net/nf_conntrack）, 丢的就是页面上
-#   每个设备 / 每个应用的流量数字。秒级结束的大流量丢得最狠:
-#   实测同一批 3x9.7MB 下载, 统计精度在 14%~145% 之间抖。
-#   把 FIN 老化放到 30s, 条目能活到下一次 stats 轮询之后再回收,
-#   同一批下载的精度收敛到 ~104%(正好等于以太网/IP/TCP 头开销)。
+#   conntrack 累计值是一切按流统计（/proc/net/nf_conntrack、连接数/流量看板）
+#   的数据源, 秒级结束的大流量丢得最狠。
+#   把 FIN 老化放到 30s, 条目能活到下一次 stats 轮询之后再回收。
 #
 # 怎么验证打进去了（刷完固件，寄存器是初始化时锁存的，读回来就是实际生效值）:
 #   devmem 0x1FB50E40 32   →  0x001E003C  正确（0x1E=30 秒 FIN, 0x3C=60 秒 TCP）
@@ -127,106 +120,7 @@ else
 fi
 
 ########################################
-# 2) Go 工具链: 换成最新版本
-#    immortalwrt/packages 里的 lang/golang 版本偏旧，mosdns 5.3.x 需要较新的 Go。
-#    换成 sbwml/packages_lang_golang（26.x/27.x 分支持续跟进上游），
-#    顺序: 27.x -> 26.x -> 25.x 逐级回退，保证不会因为分支改名整体失败。
-########################################
-echo "==== [diy-full-p2] 替换 Go 工具链为最新版 ===="
-GO_REPO=https://github.com/sbwml/packages_lang_golang
-GO_DIR=feeds/packages/lang/golang
-GO_TMP=/tmp/golang-src
-GO_BRANCH=""
-rm -rf "$GO_TMP"
-for b in 27.x 26.x 25.x; do
-  rm -rf "$GO_TMP"
-  if git clone --depth 1 -b "$b" "$GO_REPO" "$GO_TMP" 2>/dev/null; then
-    GO_BRANCH="$b"
-    break
-  fi
-  echo "    ⚠️  $b 分支拉取失败，尝试下一个"
-done
-if [ -z "$GO_BRANCH" ]; then
-  echo "    ❌ Go 工具链替换失败（三个分支都拉不下来）"; exit 1
-fi
-# 布局兼容: 上游 packages 仓库是 Makefile 与 golang-package.mk 同级；
-# sbwml 仓库根放 *.mk + golang-build.sh，包的 Makefile 在 golang/ 子目录。
-# 整个仓库原样铺到 lang/golang 下，两种布局都能被 buildroot 扫到。
-rm -rf "$GO_DIR"
-mkdir -p "$GO_DIR"
-cp -a "$GO_TMP"/. "$GO_DIR"/
-rm -rf "$GO_TMP"
-GO_MK=""
-for c in "$GO_DIR/Makefile" "$GO_DIR/golang/Makefile"; do
-  if [ -f "$c" ]; then GO_MK="$c"; break; fi
-done
-if [ -z "$GO_MK" ] || [ ! -f "$GO_DIR/golang-package.mk" ]; then
-  echo "    ❌ Go 工具链布局异常（Makefile: ${GO_MK:-缺失}）"; exit 1
-fi
-GO_VER=$(grep -m1 '^PKG_VERSION' "$GO_MK" | cut -d= -f2 | tr -d ' ')
-GO_MM=$(grep -m1 '^GO_VERSION_MAJOR_MINOR' "$GO_MK" | cut -d= -f2 | tr -d ' ')
-echo "    ✅ 分支 $GO_BRANCH / Go $GO_VER (${GO_MM}) / Makefile: $GO_MK"
-
-########################################
-# 3) 清理源码/feeds 里自带的 mosdns、v2ray-geodata
-#    它们的包名与下面 sbwml 的版本重名，同时存在会导致 duplicate package。
-########################################
-echo "==== [diy-part2] 清理源码自带的 mosdns / v2ray-geodata ===="
-for d in feeds/packages/net/mosdns \
-         feeds/packages/net/v2ray-geodata \
-         package/feeds/packages/mosdns \
-         package/feeds/packages/v2ray-geodata \
-         package/mosdns \
-         package/v2ray-geodata; do
-  if [ -e "$d" ]; then rm -rf "$d"; echo "    已删除 $d"; fi
-done
-# 兜底: 任何位置残留的同名 Makefile 一并清掉（跳过 .git）
-find package feeds -path '*/.git' -prune -o -type f -name Makefile -print 2>/dev/null \
-  | grep -E '/(mosdns|v2ray-geodata)/Makefile$' \
-  | while read -r f; do
-      rm -rf "$(dirname "$f")"
-      echo "    已删除 $(dirname "$f")"
-    done || true
-echo "    ✅ 清理完成"
-
-########################################
-# 4) OAF: 先删掉源码里自带的，再重新拉最新
-#    ponwrt 主树本身不含 OAF（官方 configs 里的 kmod-oaf/appfilter 是历史残留），
-#    但 feeds / 旧分支可能带一份旧版；用户态与内核模块版本不匹配会 insmod 失败，
-#    所以统一“先删干净再拉 master”。三个包:
-#      oaf/            -> kmod-oaf   （netfilter 内核模块）
-#      open-app-filter -> appfilter  （oafd 用户态守护进程）
-#      luci-app-oaf    -> LuCI 界面（依赖 luci-compat / luci-lib-jsonc）
-########################################
-echo "==== [diy-part2] OAF: 删除自带源码并重新拉取最新版 ===="
-# 4.1 删掉 package/ 与 feeds/ 下所有同名目录（含 feeds install 留下的链接）
-find package feeds -maxdepth 5 -path '*/.git' -prune -o -type d \
-  \( -name "OpenAppFilter" -o -name "open-app-filter" -o -name "luci-app-oaf" -o -name "oaf" \) \
-  -print 2>/dev/null | while read -r d; do
-    rm -rf "$d"; echo "    已删除 $d"
-  done || true
-rm -rf package/feeds/*/luci-app-oaf package/feeds/*/OpenAppFilter package/feeds/*/open-app-filter 2>/dev/null || true
-
-# 4.2 重新拉取
-OAF_REPO=https://github.com/destan19/OpenAppFilter.git
-rm -rf /tmp/oafsrc
-if ! git clone --depth 1 "$OAF_REPO" /tmp/oafsrc; then
-  echo "    ❌ OAF 克隆失败"; exit 1
-fi
-for p in oaf open-app-filter luci-app-oaf; do
-  if [ -f "/tmp/oafsrc/$p/Makefile" ]; then
-    cp -a "/tmp/oafsrc/$p" "package/$p"
-    echo "    ✅ package/$p ($(grep -m1 '^PKG_VERSION' /tmp/oafsrc/$p/Makefile || echo 'kmod'))"
-  else
-    echo "    ❌ 上游缺少目录 $p"; exit 1
-  fi
-done
-OAF_REV=$(git -C /tmp/oafsrc log -1 --format='%h %ad' --date=short)
-echo "    OAF 上游版本: $OAF_REV"
-rm -rf /tmp/oafsrc
-
-########################################
-# 5) luci-app-airoha-npu (luanmuc)
+# 3) luci-app-airoha-npu (luanmuc)
 ########################################
 echo "==== [diy-part2] luci-app-airoha-npu (luanmuc) ===="
 rm -rf package/luci-app-airoha-npu
@@ -244,37 +138,7 @@ else
 fi
 
 ########################################
-# 6) mosdns v5: 整仓克隆（本体 + LuCI + geo2txt）
-#    sbwml/luci-app-mosdns 的 v5 分支里有三个子目录:
-#      mosdns/          -> 本体 5.3.x（v5）
-#      luci-app-mosdns/ -> LuCI 界面
-#      geo2txt/         -> 解析 v2ray geosite/geoip 的 C 工具
-#    直接放到 package/mosdns，OpenWrt 会递归发现子目录里的 Makefile。
-########################################
-echo "==== [diy-part2] mosdns v5 (sbwml/luci-app-mosdns) ===="
-MOSDNS_REPO=https://github.com/sbwml/luci-app-mosdns.git
-rm -rf package/mosdns
-if ! git clone --depth 1 -b v5 "$MOSDNS_REPO" package/mosdns; then
-  echo "    ❌ mosdns 克隆失败"; exit 1
-fi
-for p in mosdns luci-app-mosdns geo2txt; do
-  if [ -f "package/mosdns/$p/Makefile" ]; then
-    echo "    ✅ package/mosdns/$p ($(grep -m1 '^PKG_VERSION' "package/mosdns/$p/Makefile"))"
-  else
-    echo "    ❌ 上游缺少 package/mosdns/$p/Makefile"; exit 1
-  fi
-done
-
-echo "==== [diy-part2] v2ray-geodata (sbwml) ===="
-rm -rf package/v2ray-geodata
-if git clone --depth 1 https://github.com/sbwml/v2ray-geodata package/v2ray-geodata; then
-  echo "    ✅ package/v2ray-geodata ($(grep -m1 '^PKG_VERSION' package/v2ray-geodata/Makefile 2>/dev/null || echo 'ok'))"
-else
-  echo "    ❌ v2ray-geodata 克隆失败"; exit 1
-fi
-
-########################################
-# 7) 去除 dummy 接口
+# 4) 去除 dummy 接口
 ########################################
 echo "==== [diy-part2] 去除 dummy 接口 ===="
 # 目标板上 dummy0 通常来自 base-files 的 network 模板（config device 'dummy0'），
@@ -302,7 +166,7 @@ for f in target/linux/airoha/base-files/etc/config/network \
 done
 
 ########################################
-# 8) 关键包存在性检查 (feeds 已 update)
+# 5) 关键包存在性检查 (feeds 已 update)
 ########################################
 echo "==== [diy-part2] 关键包存在性检查 ===="
 fail=0
@@ -315,20 +179,12 @@ chk feeds/pon_userspace/luci-app-onu
 chk feeds/pon_userspace/luci-app-pon-status
 chk feeds/pon_userspace/airoha-pon-daemons
 # 本脚本拉取的
-chk package/oaf
-chk package/open-app-filter
-chk package/luci-app-oaf
-chk package/mosdns/mosdns
-chk package/mosdns/luci-app-mosdns
-chk package/mosdns/geo2txt
-chk package/v2ray-geodata
 chk package/luci-app-airoha-npu
-chk feeds/packages/lang/golang
 if [ "$fail" = "1" ]; then echo "❌ 有包缺失，终止"; exit 1; fi
 echo "    ✅ 全部就位"
 
 ########################################
-# 9) 删掉 LuCI「系统 → 插件」页
+# 6) 删掉 LuCI「系统 → 插件」页
 #
 # 这个页面来自 luci-mod-system 的 luci-plugins 框架：
 #   htdocs/luci-static/resources/view/system/plugins.js  (视图)

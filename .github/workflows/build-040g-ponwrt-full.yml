@@ -5,19 +5,17 @@
 # 配置:     ponwrt 官方 configs/an7581.config + configs/release.config 作基线，
 #           仓库根 .config 作叠加层（只写要额外选的包与开关）
 # DIY:      diy-part1(改 feeds) / diy-part2(内核+插件) / diy-part3(argon, feeds install 之后)
-# 落地文件: files/  (实机 etc/config、root 密码、fwxd 特性、OAF 应用图标、首启 uci-defaults)
+# 落地文件: files/  (实机 etc/config、root 密码、首启 uci-defaults)
 #
 # 关键特性:
 #   - 桥接(L2)/L3 硬件加速: fw4 flowtable + PPE, 默认 flow_offloading=1
 #   - 每流字节统计: CONFIG_NET_AIROHA_FLOW_STATS=y (airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS)
+#   - PPE TCP_FIN 老化 1s -> 30s，保证卸载流的尾部字节能被 conntrack 回写采到
 #   - PON 光模块驱动: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572，全部强制 =y
 #   - 2.5G 网口: kmod-phy-airoha-en8811h + airoha-en8811h-firmware，强制 =y（lan1 2500base-x）
 #   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
-#   - OAF 应用识别: 先删掉源码/feeds 里自带的 OpenAppFilter，再重新 clone
-#                  destan19/OpenAppFilter 最新版（kmod-oaf + appfilter + luci-app-oaf）
 #   - UPnP: miniupnpd-nftables + luci-app-upnp
-#   - mosdns v5: sbwml/luci-app-mosdns v5 整仓（本体 5.3.x + LuCI + geo2txt）+ sbwml v2ray-geodata，
-#                Go 工具链同步换成 sbwml/packages_lang_golang 27.x（Go 1.27.3）
+#   - 不编入 OAF 应用识别、mosdns 分流（含 Go 工具链），.config 里显式 is not set
 #   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
 #   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
 #
@@ -42,8 +40,7 @@ permissions:
   contents: write
   actions: write
 
-# 与纯净版 (build-040g-ponwrt-lite.yml) 共用 toolchain-cache 这个 Release，
-# 同组串行，避免两个工作流同时写缓存互相覆盖
+# 同一时刻只允许一个构建任务写 toolchain-cache 这个 Release，避免互相覆盖
 concurrency:
   group: ponwrt-toolchain-cache
   cancel-in-progress: false
@@ -178,7 +175,7 @@ jobs:
     - name: Install feeds
       run: |
         cd openwrt
-        # 个别 feed 包可能与本地 package/ 里的同名包冲突（argon / oaf / mosdns 已由 diy 脚本接管），
+        # 个别 feed 包可能与本地 package/ 里的同名包冲突（argon 已由 diy 脚本接管），
         # install 返回非 0 时继续，真正的缺失由下一步的包校验兜底。
         ./scripts/feeds install -a || echo "⚠️  feeds install 返回非 0，继续（后续有包存在性校验）"
 
@@ -282,78 +279,29 @@ jobs:
         need CONFIG_PACKAGE_luci-app-airoha-npu
         need CONFIG_PACKAGE_luci-app-onu
         need CONFIG_PACKAGE_luci-app-pon-status
-        echo "----- OAF 应用识别 (对应 files/ 里的 oaf 图标与 fwxd/feature.bin) -----"
-        need CONFIG_PACKAGE_kmod-oaf
-        need CONFIG_PACKAGE_appfilter
-        need CONFIG_PACKAGE_luci-app-oaf
         echo "----- UPnP -----"
         need CONFIG_PACKAGE_luci-app-upnp
         need CONFIG_PACKAGE_miniupnpd-nftables
-        echo "----- mosdns v5 / Go 工具链 -----"
-        need CONFIG_PACKAGE_mosdns
-        need CONFIG_PACKAGE_luci-app-mosdns
-        need CONFIG_PACKAGE_geo2txt
-        need CONFIG_PACKAGE_v2ray-geoip
-        need CONFIG_PACKAGE_v2ray-geosite
-        # golang 包的 Makefile 有两种布局, 都要认:
-        #   上游 packages: lang/golang/Makefile
-        #   sbwml 27.x:    lang/golang/golang/Makefile  (仓库根放 *.mk, 包在 golang/ 子目录)
-        GO_MK=""
-        for c in feeds/packages/lang/golang/golang/Makefile feeds/packages/lang/golang/Makefile; do
-          if [ -f "$c" ]; then GO_MK="$c"; break; fi
+        echo "----- 已移除的第三方插件（不应被任何依赖带回 .config）-----"
+        absent() {
+          if grep -qE "^$1=[ym]$" .config; then echo "❌ $1 仍被选中"; ok=0;
+          else echo "✅ $1 未编入"; fi
+        }
+        for sym in CONFIG_PACKAGE_kmod-oaf CONFIG_PACKAGE_appfilter \
+                   CONFIG_PACKAGE_luci-app-oaf CONFIG_PACKAGE_luci-app-appfilter \
+                   CONFIG_PACKAGE_mosdns CONFIG_PACKAGE_luci-app-mosdns \
+                   CONFIG_PACKAGE_geo2txt CONFIG_PACKAGE_v2ray-geoip \
+                   CONFIG_PACKAGE_v2ray-geosite; do
+          absent "$sym"
         done
-        if [ -n "$GO_MK" ]; then
-          echo "✅ Go: $(grep -m1 '^PKG_VERSION' "$GO_MK")  [$GO_MK]"
-          if grep -qE '^(mosdns|PKG_VERSION):=5\.' package/mosdns/mosdns/Makefile 2>/dev/null; then
-            echo "✅ mosdns: $(grep -m1 '^PKG_VERSION' package/mosdns/mosdns/Makefile)"
-          else
-            echo "❌ package/mosdns/mosdns 不是 v5 分支产物"; ok=0
-          fi
-        else
-          echo "❌ golang 包 Makefile 缺失 (已查 lang/golang/golang 与 lang/golang 两种布局)"; ok=0
-        fi
-        echo "----- OAF 版本（应是重新拉取的上游最新）-----"
-        echo "    appfilter: $(grep -m1 '^PKG_VERSION' package/open-app-filter/Makefile 2>/dev/null || echo '缺失')"
-        echo "    luci-app-oaf: $(grep -m1 '^PKG_VERSION' package/luci-app-oaf/Makefile 2>/dev/null || echo '缺失')"
         echo "----- files/ 叠加层 -----"
         for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow \
-                 etc/config/mosdns etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
-                 etc/uci-defaults/99-ponwrt-time \
-                 usr/lib/lua/luci/oaf_traffic.lua \
-                 usr/lib/lua/luci/controller/oaf_user.lua \
-                 usr/lib/lua/luci/controller/oaf_dashboard.lua \
-                 usr/lib/lua/luci/view/oaf/dashboard.htm \
-                 usr/lib/lua/luci/view/oaf/user_status.htm \
-                 usr/lib/lua/luci/view/oaf/user_detail.htm \
-                 usr/lib/lua/luci/view/oaf/app_record.htm \
-                 usr/lib/lua/luci/view/oaf/whitelist.htm \
-                 usr/lib/lua/luci/view/oaf/app_filter/rules.htm \
-                 usr/lib/lua/luci/view/oaf/mac_filter/rules.htm \
-                 usr/lib/lua/luci/view/oaf/mac_filter/user.htm \
-                 usr/sbin/oaf-flowd etc/init.d/oaf-flowd; do
+                 etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
+                 etc/uci-defaults/99-040g-md etc/uci-defaults/99-ponwrt-time; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
-        # 采集器 / 服务脚本必须带可执行位（git 在 Windows 上 checkout 会丢，靠 index 的 755 保住）
-        if [ -x "files/usr/sbin/oaf-flowd" ]; then
-          echo "✅ files/usr/sbin/oaf-flowd 可执行 ($(stat -c%s files/usr/sbin/oaf-flowd) 字节)"
-        else
-          echo "❌ files/usr/sbin/oaf-flowd 没有可执行位"; ok=0
-        fi
-        # OUI 品牌库（设备图标 + vendor 名字）
-        if [ -f "files/www/luci-static/resources/oui/vendors-d337209f8c00.json" ]; then
-          echo "✅ OUI 品牌库 $(ls files/www/luci-static/resources/oui/*.svg 2>/dev/null | wc -l) 个厂牌图标"
-        else
-          echo "❌ files/ 缺少 OUI 品牌库（设备图标会全部退化成首字母）"; ok=0
-        fi
-        # mosdns 的 adblock 默认必须是关的：ad_source 为空时 adblock=1 会让 mosdns 起不来，
-        # 连带 dnsmasq 没有上游 → 全网 DNS 死 → NTP 用域名也校不回时间
-        if grep -q "option adblock '0'" files/etc/config/mosdns 2>/dev/null; then
-          echo "✅ mosdns adblock 默认关闭"
-        else
-          echo "❌ files/etc/config/mosdns 里 adblock 没关（无 ad_source 时会崩）"; ok=0
-        fi
         if grep -q "203.107.6.88" files/etc/uci-defaults/99-ponwrt-time 2>/dev/null; then
-          echo "✅ 首启时区/NTP/adlist 兜底脚本就位"
+          echo "✅ 首启时区/NTP 兜底脚本就位"
         else
           echo "❌ files/etc/uci-defaults/99-ponwrt-time 缺失或没写 NTP IP"; ok=0
         fi
@@ -363,10 +311,11 @@ jobs:
         else
           echo "❌ files/etc/apk/config 里没有 allow-untrusted"; ok=0
         fi
-        if ls files/www/luci-static/resources/oaf/app_icons/*.png >/dev/null 2>&1; then
-          echo "✅ OAF 应用图标 $(ls files/www/luci-static/resources/oaf/app_icons/*.png | wc -l) 个"
+        # OMCI 设置 → 兼容性 → OMCC 版本，出厂默认 0x86
+        if grep -q "option omcc_version '0x86'" files/etc/config/pon 2>/dev/null; then
+          echo "✅ OMCC 版本默认 0x86"
         else
-          echo "⚠️  files/ 中没有 OAF 应用图标"
+          echo "❌ files/etc/config/pon 里 omcc_version 不是 0x86"; ok=0
         fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
@@ -546,15 +495,6 @@ jobs:
         cd openwrt
         echo "dl 命中: ${{ steps.dl-cache.outputs.cache-hit }} / ccache 命中: ${{ steps.ccache-cache.outputs.cache-hit }}"
         du -sh dl 2>/dev/null || echo "dl 尚不存在"
-        # Go 模块缓存 (dl/go-mod-cache) 不要跨构建复用。
-        # 实证: run 41485399379 / 41397272479 没有 dl 缓存时 mosdns 5.3.4 编译通过;
-        # run 41485388868 恢复了含 go-mod-cache 的 dl 缓存, package/mosdns/mosdns
-        # 进 compile 5 秒就 failed to build (GOMODCACHE 里是别的构建留下的模块集)。
-        # 删掉最稳: Go 包会在线重取, 多花 1~2 分钟, 换掉一类难查的秒失败。
-        if [ -d dl/go-mod-cache ]; then
-          echo "丢弃 dl/go-mod-cache ($(du -sh dl/go-mod-cache | cut -f1)), Go 包改为在线取模块"
-          rm -rf dl/go-mod-cache
-        fi
         du -sh .ccache 2>/dev/null || echo ".ccache 尚不存在"
         df -hT / | tail -1
 

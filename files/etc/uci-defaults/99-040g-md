@@ -40,7 +40,18 @@ if uci -q get argon.@global[0] >/dev/null 2>&1; then
 fi
 
 #
-# 4) 让 fw4 重新生成规则（含 bridge flowtable）
+# 4) OMCI 设置 → 兼容性 → OMCC 版本固定为 0x86
+#    LuCI 页面默认值是 0xb0，这里对所有 omci 段兜底写一次：
+#    升级刷机时 /etc/config/pon 会被保留，光改 files/ 里的出厂配置不生效。
+#    0x86 是兼容性页下拉框里的合法值（0x86/0xa0/0xa8/0xb0/0xb4）。
+#
+for s in $(uci -q show pon 2>/dev/null | sed -n "s/^pon\.\([^.=]*\)=omci$/\1/p"); do
+	uci -q set pon."$s".omcc_version='0x86'
+done
+uci -q commit pon 2>/dev/null
+
+#
+# 5) 让 fw4 重新生成规则（含 bridge flowtable）
 #
 /etc/init.d/firewall reload >/dev/null 2>&1
 

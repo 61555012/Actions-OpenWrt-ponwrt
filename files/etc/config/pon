@@ -7,7 +7,7 @@ config omci 'line0_omci'
 	option line 'line0'
 	option device 'omci0'
 	option huawei_compat '0'
-	option omcc_version '0xb0'
+	option omcc_version '0x86'
 
 config oam 'line0_oam'
 	option line 'line0'
