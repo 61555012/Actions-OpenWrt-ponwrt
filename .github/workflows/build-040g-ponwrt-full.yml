@@ -297,14 +297,9 @@ jobs:
         echo "----- files/ 叠加层 -----"
         for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow \
                  etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
-                 etc/uci-defaults/99-040g-md etc/uci-defaults/99-ponwrt-time; do
+                 etc/uci-defaults/99-040g-md; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
-        if grep -q "203.107.6.88" files/etc/uci-defaults/99-ponwrt-time 2>/dev/null; then
-          echo "✅ 首启时区/NTP 兜底脚本就位"
-        else
-          echo "❌ files/etc/uci-defaults/99-ponwrt-time 缺失或没写 NTP IP"; ok=0
-        fi
         # apk 必须关掉签名校验
         if grep -qx 'allow-untrusted' files/etc/apk/config 2>/dev/null; then
           echo "✅ apk 已关闭签名校验 (allow-untrusted)"
@@ -316,6 +311,29 @@ jobs:
           echo "✅ OMCC 版本默认 0x86"
         else
           echo "❌ files/etc/config/pon 里 omcc_version 不是 0x86"; ok=0
+        fi
+        # 实时 CPU 占用：rpcd 的 ucode 脚本 + overview 前端（两者必须同时存在，
+        # 只改后端则数字不刷新，只改前端则首屏拿不到值）
+        for f in usr/share/rpcd/ucode/luci \
+                 www/luci-static/resources/view/status/include/10_system.js; do
+          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
+        done
+        if grep -q 'function selfTicks' files/usr/share/rpcd/ucode/luci 2>/dev/null &&
+           grep -q "sprintf('CPU: %d%%'" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
+          echo "✅ CPU 占用为实时采样（已扣除采样器自身占用）"
+        else
+          echo "❌ files/usr/share/rpcd/ucode/luci 不是实时 CPU 采样版本"; ok=0
+        fi
+        if grep -q 'PPE:' files/usr/share/rpcd/ucode/luci 2>/dev/null; then
+          echo "❌ CPU 行仍带 PPE 前缀（应只显示 CPU: x%）"; ok=0
+        else
+          echo "✅ CPU 行不再附带 PPE"
+        fi
+        if grep -q 'poll.add' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null &&
+           grep -q 'document.hidden' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null; then
+          echo "✅ overview 的 CPU 行 3 秒轮询 + 页面不可见时停采"
+        else
+          echo "❌ 10_system.js 缺少轮询或可见性判断"; ok=0
         fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then

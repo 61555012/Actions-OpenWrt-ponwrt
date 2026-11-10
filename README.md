@@ -23,7 +23,8 @@ files/                                         # 原样合并进固件根目录
   etc/internet.nft / etc/iptv.nft            # wanup / IPTV 桥接规则（firewall include 引用）
   etc/apk/config                             # apk 信任配置：allow-untrusted
   etc/uci-defaults/99-040g-md                # 首启：加速开关 / 去 dummy / 主题 / OMCC 版本
-  etc/uci-defaults/99-ponwrt-time            # 首启：时区 CST-8 / NTP 纯 IP
+  usr/share/rpcd/ucode/luci                  # getCPUUsage 改为实时采样（扣除采样器自身占用）
+  www/luci-static/resources/view/status/include/10_system.js  # overview 的 CPU 行 3 秒轮询
 ```
 
 ## 编译出来的东西
@@ -38,7 +39,8 @@ files/                                         # 原样合并进固件根目录
 | 2.5G 网口 | `kmod-phy-airoha-en8811h` + `airoha-en8811h-firmware`，**强制 `=y`**（lan1，`2500base-x` 链路） |
 | UPnP | `miniupnpd-nftables` + `luci-app-upnp`（fw4 是 nftables，必须 nftables 变体） |
 | 其他插件 | `luci-app-onu` + `luci-app-pon-status`（[naoki66/OpenWrt_ONU_CONFIG](https://github.com/naoki66/OpenWrt_ONU_CONFIG)）、`luci-app-airoha-npu`（[luanmuc](https://github.com/luanmuc/luci-app-airoha-npu)）、`argon v3.1.1` |
-| OMCI 兼容性 | `omcc_version` 默认 **`0x86`**（见「6. OMCC 版本」） |
+| OMCI 兼容性 | `omcc_version` 默认 **`0x86`**（见「5. OMCC 版本」） |
+| CPU 占用 | overview 的 `CPU usage (%)` 改为 `/proc/stat` 增量采样，3 秒刷新，已扣除采样器自身开销（见「9.」） |
 | 去除项 | dummy 接口（`kmod-dummy` 不选 + 构建期删 base-files 模板 + 首启 uci 清理） |
 
 ## 关键设计说明
@@ -108,13 +110,7 @@ printf 'allow-untrusted\n' > /etc/apk/config
 apk add /tmp/x.apk              # 签名这道关卡不再拦
 ```
 
-### 5. 时区与 NTP
-
-本机没有 RTC，开机时钟来自 `/etc` 里最新文件的 mtime（≈刷机时间），只能靠 ntpd 一步跳回来。`files/etc/uci-defaults/99-ponwrt-time` 首启把时区设为 `CST-8` / `Asia/Shanghai`，并把 NTP peer 全部写成**纯 IP**（`203.107.6.88`、`120.25.115.20`、`182.92.12.11`）——用域名的话，DNS 一挂时间就永远校不回来。
-
-> 2026-11 实测：`114.118.7.161/163`（国家授时中心）、`223.5.5.5`、`119.28.183.184` 都不回包；busybox `ntpd` 没有 1000 s 的 step 上限，一步跳十几天也能校正。
-
-### 6. OMCI 设置 → 兼容性 → OMCC 版本 = 0x86
+### 5. OMCI 设置 → 兼容性 → OMCC 版本 = 0x86
 
 LuCI「网络 → ONU → 设置 → 兼容性」里的 `omcc_version` 决定 ONU 向 OLT 声明的 OMCI 基线，可选值为 `0x86 / 0xa0 / 0xa8 / 0xb0 / 0xb4`，上游页面默认是 `0xb0`。本仓库改成 **`0x86`**（兼容不认老旧/第三方 ONU 的华为 OLT），两处一起改：
 
@@ -123,15 +119,15 @@ LuCI「网络 → ONU → 设置 → 兼容性」里的 `omcc_version` 决定 ON
 
 工作流编译前会校验 `files/etc/config/pon` 里的值，不是 `0x86` 直接失败。
 
-### 7. argon 为什么要单独一个 diy-ponwrt-full-3
+### 6. argon 为什么要单独一个 diy-ponwrt-full-3
 
 feeds（immortalwrt/luci）里自带同名 `luci-theme-argon`。如果在 `feeds install` **之前**删掉 feeds 目录，install 会留下悬空链接/报错；所以放到 install **之后**：删 `package/feeds/luci/luci-theme-argon` 软链 → 删 `feeds/.../luci-theme-argon` 目录 → 克隆 v3.1.1 到 `package/luci-theme-argon`，并断言版本号是 3.x。
 
-### 8. dummy 接口
+### 7. dummy 接口
 
 `kmod-dummy` 不选中；`diy-ponwrt-full-2.sh` 把 base-files 里 `option name 'dummy0'` 的 device 段整段删掉；首启 uci-defaults 再兜底清理 `network` 里所有 dummy 段，已刷过旧固件升级上来的同样会清干净。
 
-### 9. 工具链缓存
+### 8. 工具链缓存
 
 两级缓存，键里带 `tools/` `toolchain/` 下所有 `Makefile`/`*.mk` 的哈希：
 
@@ -139,6 +135,28 @@ feeds（immortalwrt/luci）里自带同名 `luci-theme-argon`。如果在 `feeds
 2. GitHub Release `toolchain-cache` 里的 `toolchain-airoha-an7581-<hash>.tzst`（缓存被 LRU 挤掉时的兜底）
 
 缓存命中会自动跳过 `make tools/install` / `toolchain/install`，并用 `sed` 去掉主 `Makefile` 里的 toolchain 依赖。首次约 3~5 小时（含 rust 交叉编译 `airoha-pond`），之后约 40~70 分钟。删掉 mosdns 后不再编译 Go 工具链，首次构建比之前快。
+
+### 9. overview 的 CPU 占用改成实时采样
+
+上游 `getCPUUsage`（`/usr/share/rpcd/ucode/luci`）是：
+
+```sh
+popen('top -n1 | awk \'/^CPU/ {printf("%d%", 100 - $8)}\'')
+```
+
+busybox `top -n1` 单次运行的取样窗口只有约 0.1 秒，而 **fork `top` + ubus 往返本身就要吃掉这段时间的一部分**，所以空闲时也恒定显示 3~5%：既不归零，也不随实际负载变化（4 核实测：空闲 3%、1 核满载 25%，前者是假的）。`100 - $8` 还硬编码了字段位置。
+
+改成纯 ucode 的两点差分：
+
+- 相邻两次调用之间各读一次 `/proc/stat`（前端 3 秒轮询一次，窗口就是 3 秒），不 fork 进程、不解析文本；
+- **再扣掉采样器自己的占用**：`/proc/self/stat` 的 `utime+stime+cutime+cstime` 增量（ucode 方法在 rpcd 进程内执行，`comm` 用 `rindex(s,')')` 跳过），`busy = (dt - di) - ds` 后夹到 `[0, dt]`。不扣的话，每次测量动作的 5~8 ticks 会把它顶成 1~2% 的固定读数；
+- 距上次采样超过 10 秒（关掉页面后又打开）丢弃缓存，退化为一次 200ms 短采样，保证首屏是当前值而不是长期平均。
+
+`files/www/luci-static/resources/view/status/include/10_system.js` 里给 `CPU usage (%)` 那一格加 `poll.add(fn, 3)`，只更新单元格本身；回调先查 `el.isConnected` / `el.offsetParent` / `document.hidden`，DOM 不在或标签页隐藏就直接返回，**不发 RPC**。LuCI 的 `poll` 是全局队列、切视图不清空、也没有 `document.hidden` 判断，所以这层判断必须自己加，否则离开页面后仍在后台每 3 秒打一次。
+
+实测（4 核，`yes` 占满 N 核后取稳定的 3 秒窗口）：空闲 **0%**，1/2/3/4 核分别 **25% / 50% / 75% / 100%**，撤掉负载回到 0%；真实 `HTTP → /ubus` 路径连续轮询全部 `CPU: 0%`。
+
+> 这两个文件是**整文件覆盖**上游（rpcd 的 ucode 脚本由 luci-base 提供，overview 视图由 luci-mod-status 提供）。上游大版本更新这两个文件后需要重新对一次；工作流编译前会校验它们确实是本仓库的实时采样版本，缺失或退回 `top` 实现会直接失败。
 
 ## 使用方法
 
