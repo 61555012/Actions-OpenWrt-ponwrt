@@ -154,7 +154,7 @@ busybox `top -n1` 单次运行的取样窗口只有约 0.1 秒，而 **fork `top
 
 `files/www/luci-static/resources/view/status/include/10_system.js` 里给 `CPU usage (%)` 那一格加 `poll.add(fn, 3)`，只更新单元格本身；回调先查 `el.isConnected` / `el.offsetParent` / `document.hidden`，DOM 不在或标签页隐藏就直接返回，**不发 RPC**。LuCI 的 `poll` 是全局队列、切视图不清空、也没有 `document.hidden` 判断，所以这层判断必须自己加，否则离开页面后仍在后台每 3 秒打一次。
 
-实测（4 核，`yes` 占满 N 核后取稳定的 3 秒窗口）：空闲 **0%**，1/2/3/4 核分别 **25% / 50% / 75% / 100%**，撤掉负载回到 0%；真实 `HTTP → /ubus` 路径连续轮询全部 `CPU: 0%`。
+实测（4 核，`yes` 占满 N 核后取稳定的 3 秒窗口）：空闲 **0%**，1/2/3/4 核分别 **25% / 50% / 75% / 100%**，撤掉负载回到 0%；真实 `HTTP → /ubus` 路径连续轮询全部 `0%`。页面上只显示纯百分比（如 `0%`），不带 `CPU:` 之类前缀——与 S20P 仓库的同一改动保持一致。
 
 > 这两个文件是**整文件覆盖**上游（rpcd 的 ucode 脚本由 luci-base 提供，overview 视图由 luci-mod-status 提供）。上游大版本更新这两个文件后需要重新对一次；工作流编译前会校验它们确实是本仓库的实时采样版本，缺失或退回 `top` 实现会直接失败。
 

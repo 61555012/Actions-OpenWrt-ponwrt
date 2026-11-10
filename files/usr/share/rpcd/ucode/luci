@@ -889,7 +889,7 @@ const methods = {
 			if (pct < 0) pct = 0;
 			if (pct > 100) pct = 100;
 
-			return { cpuusage: sprintf('CPU: %d%%', pct) };
+			return { cpuusage: sprintf('%d%%', pct) };
 		}
 	},
 	getTempInfo: {

@@ -319,15 +319,16 @@ jobs:
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
         if grep -q 'function selfTicks' files/usr/share/rpcd/ucode/luci 2>/dev/null &&
-           grep -q "sprintf('CPU: %d%%'" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
+           grep -q "sprintf('%d%%'" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
           echo "✅ CPU 占用为实时采样（已扣除采样器自身占用）"
         else
           echo "❌ files/usr/share/rpcd/ucode/luci 不是实时 CPU 采样版本"; ok=0
         fi
-        if grep -q 'PPE:' files/usr/share/rpcd/ucode/luci 2>/dev/null; then
-          echo "❌ CPU 行仍带 PPE 前缀（应只显示 CPU: x%）"; ok=0
+        if grep -q 'PPE:' files/usr/share/rpcd/ucode/luci 2>/dev/null ||
+           grep -q "sprintf('CPU" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
+          echo "❌ CPU 行带了额外前缀（应只显示 0% 这样的纯百分比）"; ok=0
         else
-          echo "✅ CPU 行不再附带 PPE"
+          echo "✅ CPU 行只显示纯百分比（无 CPU: / PPE 前缀）"
         fi
         if grep -q 'poll.add' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null &&
            grep -q 'document.hidden' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null; then
