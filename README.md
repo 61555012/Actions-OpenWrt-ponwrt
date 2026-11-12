@@ -33,7 +33,7 @@ files/                                         # 原样合并进固件根目录
 | UPnP | `miniupnpd-nftables` + `luci-app-upnp` |
 | OAF | 官方 [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) 原样编译：`kmod-oaf` + `appfilter` + `luci-app-oaf` |
 | 其他插件 | `luci-app-pon`（上游 pbs05）、`luci-app-airoha-npu`（[luanmuc](https://github.com/luanmuc/luci-app-airoha-npu)）、`argon v3.1.1` |
-| 不编入 | `luci-app-iptv`、mosdns 整套、`kmod-dummy`、无线栈（`kmod-mac80211`、`kmod-mt76-core`/`-connac`、`wifi-scripts`） |
+| 不编入 | `luci-app-iptv`、mosdns 整套、`kmod-dummy`；无线栈 `kmod-mac80211` / `kmod-cfg80211` / `kmod-mt76-core` / `-connac` / `wpad-openssl` / `hostapd-common` / `wifi-scripts` / `wireless-regdb` |
 | OMCI 兼容性 | `omcc_version` 出厂默认 `0x86` |
 
 ## 关键设计
