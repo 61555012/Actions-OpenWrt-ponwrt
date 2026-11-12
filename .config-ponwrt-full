@@ -59,6 +59,13 @@ CONFIG_PACKAGE_miniupnpd-nftables=y
 # CONFIG_PACKAGE_v2ray-geosite is not set
 # CONFIG_PACKAGE_kmod-dummy is not set
 
+# 本机无 WiFi（an7581 光猫，板上没有射频芯片），关掉上游基线带进来的无线栈
+# CONFIG_PACKAGE_kmod-mt76-core is not set
+# CONFIG_PACKAGE_kmod-mt76-connac is not set
+# CONFIG_PACKAGE_kmod-mac80211 is not set
+# CONFIG_PACKAGE_wifi-scripts is not set
+# CONFIG_WIFI_SCRIPTS_UCODE is not set
+
 # luci-app-airoha-npu 靠 busybox devmem 读寄存器
 CONFIG_BUSYBOX_DEFAULT_DEVMEM=y
 
