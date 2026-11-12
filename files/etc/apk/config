@@ -1,8 +1,1 @@
-# /etc/apk/config -- apk-tools 3 全局配置
-#
-# allow-untrusted:
-#   安装没有签名、或签名公钥不在 /etc/apk/keys/ 里的 apk 包时，不再拒绝
-#   （相当于每条 apk 命令都自带 --allow-untrusted）。
-#   apk 原生只认命令行的 --allow-untrusted，这个配置文件是它唯一能持久化该开关的地方；
-#   选项是"无参数"开关，写成 allow-untrusted 即可，写成 allow-untrusted=yes 会被忽略并告警。
 allow-untrusted

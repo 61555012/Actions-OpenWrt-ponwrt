@@ -1,24 +1,21 @@
 #!/bin/bash
+# diy-ponwrt-full-2.sh —— feeds update 之后、feeds install 之前执行
 #
-# diy-ponwrt-full-2.sh —— 在 feeds update 之后、feeds install 之前执行
+# 时机要求：
+#   - 必须在 feeds update -a 之后，否则 packages feed 会把目录重新拉回覆盖
+#   - 必须在 feeds install -a 之前，否则会留下指向旧目录的软链
 #
-# 执行时机很关键（参考 Actions-OpenWrt-S20P 的做法）:
-#   - 必须在 feeds update -a 之后: 否则 packages feed 会把上游目录重新拉回覆盖
-#   - 必须在 feeds install -a 之前: 内核补丁与 target 配置要在内核解包前写好，
-#     install 之后再改会留下不一致的索引/软链
-#
-# 本脚本做 7 件事:
-#   0) 拉 OpenAppFilter 源码：保留 oaf.ko(kmod-oaf) + oafd(appfilter)，删除 luci-app-oaf 界面
-#   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS=y
-#   2) 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
-#   3) 检查 kmod-nf-conntrack-bridge（L2 桥接加速前置）
-#   4) luci-app-airoha-npu (luanmuc)：NPU/CPU/FrameEngine/PPE 状态面板
-#   5) 去除 dummy 接口
-#   6) 关键包存在性检查 + 删掉 LuCI 里没用的「系统 → 插件」页
+# 做的事：
+#   0) 拉官方 OpenAppFilter：oaf.ko + appfilter + luci-app-oaf 全部编入
+#   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS
+#   2) PPE 条目 TCP FIN 老化 1s -> 30s
+#   3) 补 kmod-nf-conntrack-bridge 检查
+#   4) 拉 luci-app-airoha-npu
+#   5) 去掉 dummy 接口
+#   6) 检查关键包 + 删除「系统 → 插件」页
 #
 set -e
 
-# 定位源码树：脚本可能被从仓库根或 openwrt/ 内调用，统一进 openwrt/
 cd "$(dirname "$0")"
 if [ -f feeds.conf.default ] && [ -d scripts ]; then
   echo "已处于源码树根: $(pwd)"
@@ -29,41 +26,33 @@ else
   echo "❌ 找不到 openwrt 源码树 (feeds.conf.default)"; exit 1
 fi
 
-########################################
-# 0) OAF 识别内核: oaf.ko(kmod-oaf) + oafd(appfilter)
-#
-# 「状态 → 用户列表」的两块数据靠这里，缺了页面照开但内容为空：
-#   oaf/Makefile             -> KernelPackage/oaf      => kmod-oaf
-#   open-app-filter/Makefile -> Package/appfilter      => oafd + 特征库 + init
-#   luci-app-oaf             -> 官方管理界面，自研插件已完全替代，必须删掉，
-#                               否则侧边栏会多出第二套重复菜单
-#
-# 时机: 必须在 feeds update -a 之后、feeds install -a 之前。
-#   - 之后: 否则 packages feed 更新时会把同名目录重新拉回来覆盖
-#   - 之前: 否则 feeds install 会留下指向旧目录的软链, 编译期找不到 Makefile
-########################################
-echo "==== [diy-part2] OAF 识别内核: 只留 oaf.ko + open-app-filter, 删除 luci-app-oaf 界面 ===="
+# 0) OAF：官方三件套，不 patch、不魔改
+#    清掉旧的同名目录，避免与 feeds 里的软链冲突
+echo "==== [diy-part2] OAF: 拉最新官方源码 (oaf.ko + open-app-filter + luci-app-oaf) ===="
 find . -type d \( -name "OpenAppFilter" -o -name "luci-app-oaf" -o -name "open-app-filter" \) \
 	-exec rm -rf {} + 2>/dev/null || true
 rm -rf package/feeds/*/luci-app-oaf package/feeds/*/OpenAppFilter
 git clone --depth 1 https://github.com/destan19/OpenAppFilter package/OpenAppFilter
-rm -rf package/OpenAppFilter/luci-app-oaf
-if [ -f package/OpenAppFilter/oaf/Makefile ] && [ -f package/OpenAppFilter/open-app-filter/Makefile ]; then
-  echo "    ✅ 已就位: $(ls package/OpenAppFilter | tr '\n' ' ')"
-  echo "       oaf.ko 由内核树编译（an7581 当前 6.18），appfilter 依赖 libuci-lua/sqlite3/curl"
-else
+OAFC=$(git -C package/OpenAppFilter rev-parse --short HEAD 2>/dev/null || echo '?')
+echo "    官方 OAF commit: ${OAFC}"
+OAF_MISS=0
+for d in oaf open-app-filter luci-app-oaf; do
+  if [ -f "package/OpenAppFilter/$d/Makefile" ]; then
+    echo "    ✅ package/OpenAppFilter/$d"
+  else
+    echo "    ❌ 缺少 package/OpenAppFilter/$d"; OAF_MISS=1
+  fi
+done
+if [ "$OAF_MISS" = "1" ]; then
   echo "    ❌ OpenAppFilter 克隆不完整（网络问题？检查 github 连通性）"; exit 1
 fi
 
-########################################
-# 1) 内核: 每流流量统计
-########################################
+# 1) 内核每流流量统计
 echo "==== [diy-part2] 打开 CONFIG_NET_AIROHA_FLOW_STATS ===="
 KC=target/linux/airoha/an7581/config-6.18
 if [ -f "$KC" ]; then
-  # 原文件里是 "# CONFIG_NET_AIROHA_FLOW_STATS is not set"
   sed -i 's/^# CONFIG_NET_AIROHA_FLOW_STATS is not set$/CONFIG_NET_AIROHA_FLOW_STATS=y/' "$KC"
-  # 若原来没有这一行（上游改名/移动），直接追加
+  # 上游若改名/移动了这一行，直接追加
   grep -q '^CONFIG_NET_AIROHA_FLOW_STATS=' "$KC" || echo 'CONFIG_NET_AIROHA_FLOW_STATS=y' >> "$KC"
   if grep -q '^CONFIG_NET_AIROHA_FLOW_STATS=y' "$KC"; then
     echo "    ✅ $KC 已打开每流统计"
@@ -75,42 +64,11 @@ else
   echo "    ❌ 未找到 $KC"; exit 1
 fi
 
-########################################
-# 2) 内核: 拉长 PPE 条目在 TCP FIN 之后的老化时间 (1s -> 30s)
-#
-# 为什么改（和流量统计是同一件事，不是两件事）:
-#   airoha_ppe_hw_init() 给 PPE_BIND_AGE1 写的 delta_tcp_fin 是 1(秒),
-#   delta_tcp 是 60(秒)。收到 FIN 的流由硬件按 delta_tcp_fin 老化,
-#   也就是"最后一个包之后约 1 秒"条目就从 PPE 表里消失。
-#
-#   报文一旦下到 PPE, 就不再经过 netfilter, conntrack 里的字节数只能靠驱动
-#   定期回写拿到:
-#     nf_flow_table → airoha_ppe_flow_offload_cmd(FLOW_CLS_STATS)
-#       → airoha_ppe_flow_offload_stats() → airoha_ppe_foe_entry_get_stats()
-#       → 读 npu->stats[index] 的增量, 累加进 flow 的 pkts/bytes
-#   FLOW_CLS_DESTROY（删条目）只 airoha_ppe_foe_flow_remove_entry(), 不取最后一次计数。
-#   所以条目一旦先被硬件回收, 下一次 FLOW_CLS_STATS 轮到这个 hash 时
-#   airoha_ppe_foe_get_flow_stats_index() 已经失败, 尾部这一截字节永久丢失。
-#   conntrack 累计值是一切按流统计（/proc/net/nf_conntrack、连接数/流量看板）
-#   的数据源, 秒级结束的大流量丢得最狠。
-#   把 FIN 老化放到 30s, 条目能活到下一次 stats 轮询之后再回收。
-#
-# 怎么验证打进去了（刷完固件，寄存器是初始化时锁存的，读回来就是实际生效值）:
-#   devmem 0x1FB50E40 32   →  0x001E003C  正确（0x1E=30 秒 FIN, 0x3C=60 秒 TCP）
-#   devmem 0x1FB50E40 32   →  0x0001003C  说明还是源码默认 1 秒，补丁没进内核
-#   注意：运行中用 devmem 写回这个寄存器无效（条目照样 0.5s 内回收），
-#   这些 delta 只在 airoha_ppe_hw_init() 里锁存一次，只能改源码重编。
-#
-# 代价:
-#   已结束的连接在 PPE 表里多占 30 秒槽位。表有 16K 槽(4K SRAM + 12K DRAM),
-#   家用场景同时在用的流只有几百条, 没有压力; TCP 的常态老化(60s)保持不变。
-#
-# 写法:
-#   往 target/linux/airoha/patches-6.18/ 放一个普通 unified diff,
-#   内核解包时由 buildroot 的 quilt 流程自动打上(-p1)。
-#   万一上游改动了这段代码导致打不上, 内核 prepare 阶段会直接报错中断,
-#   不会静默产出"没改过"的固件。
-########################################
+# 2) PPE 条目在 TCP FIN 后的老化 1s -> 30s
+#    报文卸载到 PPE 后不再过 netfilter，字节数只能靠 FLOW_CLS_STATS 轮询回写；
+#    条目若在 FIN 后 1 秒就被硬件回收，下一次轮询已取不到计数，尾部字节永久丢失。
+#    验证：devmem 0x1FB50E40 32 → 0x001E003C（0x1E=30s FIN，0x3C=60s TCP）
+#    该值只在 airoha_ppe_hw_init() 锁存一次，运行中 devmem 写回无效。
 echo "==== [diy-part2] 拉长 PPE TCP_FIN 老化时间 (1s -> 30s) ===="
 PDIR=target/linux/airoha/patches-6.18
 if [ ! -d "$PDIR" ]; then
@@ -138,7 +96,6 @@ else
   echo "    ❌ 补丁写入异常: $PFILE"; exit 1
 fi
 
-# 硬件加速链路必需的 conntrack bridge 支持（an7581 target.mk 已默认带，这里做兜底断言）
 echo "==== [diy-part2] 检查 kmod-nf-conntrack-bridge 是否在默认包 ===="
 if grep -q 'kmod-nf-conntrack-bridge' target/linux/airoha/an7581/target.mk; then
   echo "    ✅ target.mk DEFAULT_PACKAGES 已含 kmod-nf-conntrack-bridge"
@@ -146,9 +103,7 @@ else
   echo "    ⚠️  target.mk 未含 kmod-nf-conntrack-bridge，由 .config 显式选中"
 fi
 
-########################################
-# 3) luci-app-airoha-npu (luanmuc)
-########################################
+# 3) luci-app-airoha-npu
 echo "==== [diy-part2] luci-app-airoha-npu (luanmuc) ===="
 rm -rf package/luci-app-airoha-npu
 git clone --depth 1 https://github.com/luanmuc/luci-app-airoha-npu package/luci-app-airoha-npu
@@ -159,17 +114,12 @@ if [ -f package/luci-app-airoha-npu/Makefile ]; then
     echo "    ❌ 缺少 feeds/luci/luci.mk，插件无法构建"; exit 1
   fi
   echo "    ✅ 已就位: $(grep -m1 '^PKG_VERSION' package/luci-app-airoha-npu/Makefile)"
-  echo "    依赖 busybox devmem（.config 中 CONFIG_BUSYBOX_DEFAULT_DEVMEM=y）"
 else
   echo "    ❌ 克隆失败"; exit 1
 fi
 
-########################################
-# 4) 去除 dummy 接口
-########################################
+# 4) 去掉 dummy 接口：从 network 模板里删掉 dummy0 段，避免首启被 netifd 创建
 echo "==== [diy-part2] 去除 dummy 接口 ===="
-# 目标板上 dummy0 通常来自 base-files 的 network 模板（config device 'dummy0'），
-# 打包前直接从模板里删掉，避免首启被 netifd 创建；kmod-dummy 也不在 .config 里选中。
 clean_dummy() {
   f="$1"
   [ -f "$f" ] || return 0
@@ -192,38 +142,25 @@ for f in target/linux/airoha/base-files/etc/config/network \
   clean_dummy "$f"
 done
 
-########################################
-# 5) 关键包存在性检查 (feeds 已 update)
-########################################
+# 5) 关键包存在性检查
 echo "==== [diy-part2] 关键包存在性检查 ===="
 fail=0
 chk() { if [ -d "$1" ]; then echo "    ✅ $1"; else echo "    ❌ 缺少 $1"; fail=1; fi; }
-# PON / 光模块驱动（feeds 提供；kmod-airoha-en7572 在 airoha-pon-frontends 里定义）
 chk feeds/pon_drivers/airoha-xpon
 chk feeds/pon_drivers/airoha-pon-frontends
-# ONU 用户态
-chk feeds/pon_userspace/luci-app-onu
-chk feeds/pon_userspace/luci-app-pon-status
+# 上游 pbs05 的包名，不是 naoki66 fork 的 luci-app-onu / luci-app-pon-status
 chk feeds/pon_userspace/airoha-pon-daemons
-# 本脚本拉取的
+chk feeds/pon_userspace/airoha-ponctl
+chk feeds/pon_userspace/luci-app-pon
+# 上游带 luci-app-iptv，本固件不选中
+if [ -d feeds/pon_userspace/luci-app-iptv ]; then
+  echo "    ℹ️  feeds/pon_userspace/luci-app-iptv 存在，但不编入固件"
+fi
 chk package/luci-app-airoha-npu
 if [ "$fail" = "1" ]; then echo "❌ 有包缺失，终止"; exit 1; fi
 echo "    ✅ 全部就位"
 
-########################################
-# 6) 删掉 LuCI「系统 → 插件」页
-#
-# 这个页面来自 luci-mod-system 的 luci-plugins 框架：
-#   htdocs/luci-static/resources/view/system/plugins.js  (视图)
-#   root/usr/share/luci/menu.d/luci-mod-system.json      (菜单项 admin/system/plugins)
-# 它只会扫描 /www/luci-static/resources/view/plugins/*.js 里的插件定义，
-# 本仓库不使用这套框架，那个目录一个插件都没有 —— 点进去只有一张空表加一个
-# 「全局设置」开关，纯属误点，所以整页删掉：
-#   1) 删视图文件，页面直接不存在
-#   2) 删菜单项，侧边栏不再出现「插件」
-# 改 JSON 优先用 python3（buildroot 自身依赖 python3，一定有），
-# 没有 python3 时退回 sed 按行删。
-########################################
+# 6) 删除「系统 → 插件」页（luci-plugins 框架，本仓库不用，点进去是空表）
 echo "==== [diy-part2] 删除 系统→插件 页面 ===="
 PLG_JS=$(find feeds/luci -type f -path '*resources/view/system/plugins.js' 2>/dev/null | head -1)
 MENU_JS=$(find feeds/luci -type f -path '*menu.d/luci-mod-system.json' 2>/dev/null | head -1)

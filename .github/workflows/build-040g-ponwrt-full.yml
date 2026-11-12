@@ -1,27 +1,17 @@
+# 基于 P3TERX/Actions-OpenWrt 模板
+# 源码: pbs05/ponwrt (master) | 机型: Nokia XG-040G-MD (UBI) / airoha an7581
+# 配置: 官方 configs/an7581.config + release.config 作基线，.config-ponwrt-full 叠加
+# DIY:  diy-1 改 feeds / diy-2 内核+插件 / diy-3 argon
+# files/: etc/config、etc/shadow、etc/fwxd/feature.bin、OAF 应用图标
 #
-# 基于 P3TERX/Actions-OpenWrt 模板改造
-# 目标源码: pbs05/ponwrt (master)
-# 机型:     Nokia XG-040G-MD (UBI) / airoha an7581
-# 配置:     ponwrt 官方 configs/an7581.config + configs/release.config 作基线，
-#           仓库根 .config 作叠加层（只写要额外选的包与开关）
-# DIY:      diy-part1(改 feeds) / diy-part2(内核+插件) / diy-part3(argon, feeds install 之后)
-# 落地文件: files/  (实机 etc/config、root 密码、首启 uci-defaults)
-#
-# 关键特性:
-#   - 桥接(L2)/L3 硬件加速: fw4 flowtable + PPE, 默认 flow_offloading=1
-#   - 每流字节统计: CONFIG_NET_AIROHA_FLOW_STATS=y (airoha_ppe_foe_flow_stats_* / FLOW_CLS_STATS)
-#   - PPE TCP_FIN 老化 1s -> 30s，保证卸载流的尾部字节能被 conntrack 回写采到
-#   - PON 光模块驱动: kmod-airoha-xpon + kmod-airoha-pon-frontend + kmod-airoha-en7572，全部强制 =y
-#   - 2.5G 网口: kmod-phy-airoha-en8811h + airoha-en8811h-firmware，强制 =y（lan1 2500base-x）
-#   - 插件: luci-app-onu(naoki66 ONU_CONFIG) + luci-app-airoha-npu(luanmuc) + argon v3.1.1
-#   - UPnP: miniupnpd-nftables + luci-app-upnp
-#   - OAF 识别内核保留：kmod-oaf(oaf.ko) + appfilter(oafd + 特征库)。
-#     「状态-用户列表」(oaf_status) 是独立 Lua 插件，靠 luci-compat + ucode-mod-lua 跑，
-#     它的 APP 名 / 访问记录 / APP 时长唯一数据源就是 oafd；
-#     但官方 luci-app-oaf 界面不编入（diy-part2 删掉，自研插件已替代，避免重复菜单）。
-#   - mosdns 分流不编入（含 Go 工具链与 v2ray-geodata）。
-#   - 去除 dummy 接口 (kmod-dummy 不选 + 构建期/首启清理 dummy0)
-#   - 工具链缓存复用: actions/cache + Release(toolchain-cache) 双级缓存
+# 要点:
+#   - fw4 flowtable + PPE 硬件加速，默认 flow_offloading=1
+#   - 每流字节统计 CONFIG_NET_AIROHA_FLOW_STATS=y；PPE TCP_FIN 老化 1s -> 30s
+#   - PON 驱动栈 / 2.5G PHY 全部 =y
+#   - 插件 luci-app-pon + luci-app-oaf(官方) + luci-app-airoha-npu + argon v3.1.1
+#   - IPTV、mosdns 不编入；dummy 接口去除
+#   - OAF 用官方 destan19/OpenAppFilter 原样编译（内核 + oafd + 官方界面）
+#   - 工具链缓存: actions/cache + Release(toolchain-cache)
 #
 
 name: 040G-MD 标准版 (PonWrt)
@@ -35,9 +25,7 @@ on:
         required: false
         default: 'false'
   schedule:
-    # 每天早上 06:00（Asia/Shanghai）自动编一次。
-    # GitHub 的 cron 一律按 UTC 算，06:00 CST = 前一天 22:00 UTC，所以写 0 22 * * *
-    # 注意：GitHub 的定时任务在整点高峰常被推迟几分钟到半小时，属于平台行为。
+    # 每天 06:00 (Asia/Shanghai) 自动编一次；cron 按 UTC 算，06:00 CST = 前一天 22:00 UTC
     - cron: '0 22 * * *'
 
 permissions:
@@ -71,9 +59,7 @@ jobs:
 
     - name: Initialization environment (disk cleanup)
       run: |
-        # runner 只有 73G 磁盘, 编译期必然吃满; 先把镜像里用不到的大件清干净
-        # (android sdk / dotnet / ghc / hostedtoolcache / boost / swift / ghcup / docker 镜像)
-        # 正常 20~60 秒; docker prune 卡住就放弃, 它只是省磁盘, 不影响编译
+        # runner 只有 73G 磁盘，先清掉镜像里用不到的大件（android sdk / dotnet / ghc 等）
         t0=$(date +%s)
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                     /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
@@ -81,14 +67,8 @@ jobs:
         timeout 300 sudo docker image prune --all --force || echo "::warning::docker image prune 超时/失败, 跳过"
         timeout 300 sudo docker system prune -af --volumes || echo "::warning::docker system prune 超时/失败, 跳过"
         sudo rm -rf /var/lib/apt/lists/*
-        # ---- 补 6G swap: 编译收尾 (rootfs / squashfs 打包) 是内存峰值 ----
-        # run 42329431482 / 42345335830 都在编译 ~120 分钟时整台 runner 失联,
-        # 注解是 "starves it for CPU/Memory"。hosted runner 默认几乎没有 swap,
-        # OOM killer 一旦连 Runner.Listener 一起杀掉, job 直接 lost communication,
-        # 合并日志 blob 和 ccache 的 post-save 也全都不会发生 —— 于是下一次
-        # 又得全量重编 120 分钟, 形成死循环。
-        # 用独立文件名, 绝不碰 runner 镜像可能自带的 /swapfile:
-        # 对正在使用的 swapfile 执行 mkswap 会重写其头部, 有破坏风险。
+        # 补 6G swap：编译收尾（rootfs/squashfs 打包）是内存峰值，无 swap 会被 OOM
+        # 用独立文件名，不碰 runner 自带的 /swapfile
         SWP=/swapfile-wb
         sudo fallocate -l 6G "$SWP" 2>/dev/null || true
         if [ -f "$SWP" ]; then
@@ -105,13 +85,7 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        # ---- 为什么把 apt 拆成独立一步: ----
-        # run 42246988282 总耗时 3h35m, 其中编译只占 55 分钟, 剩下 2h36m 全挂在
-        # 这个初始化步骤里 —— 而这一步根本看不出停在哪: 原来是一条
-        #   apt-get -qq install <90 个包>
-        # -qq 把下载进度全部吞掉, 卡住时日志一行都不涨, 只能干等到 job 超时。
-        # 另外 runner 镜像本来就预装了其中大部分, 原写法等于每次重下几百 MB。
-        # 现在: 先 dpkg 探测跳过已装的, 加 --no-install-recommends, 每条网络命令都套 timeout。
+        # apt 单独一步：跳过已装包 + --no-install-recommends + 每条网络命令套 timeout
         t0=$(date +%s)
         PKGS="ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd"
         MISSING=""
@@ -193,10 +167,8 @@ jobs:
       run: |
         mkdir -p openwrt/files
         if [ -d files ]; then cp -a files/. openwrt/files/ && echo "files/ 已合并进 openwrt/files ($(find openwrt/files -type f | wc -l) 个文件)"; fi
-        # Windows 上 core.fileMode=false，checkout 出来的脚本/二进制可能没有执行位；
-        # 这里统一补齐，否则固件里 /etc/init.d/oaf-flowd 和采样器都不可执行。
-        chmod 755 openwrt/files/usr/sbin/oaf-flowd openwrt/files/etc/init.d/oaf-flowd 2>/dev/null || true
-        chmod 755 openwrt/files/etc/uci-defaults/* 2>/dev/null || true
+        # Windows 上 core.fileMode=false，脚本可能没有执行位；当前 files/ 无可执行文件，做兜底
+        chmod 755 openwrt/files/etc/init.d/* openwrt/files/etc/uci-defaults/* 2>/dev/null || true
         cd openwrt
         # 1) 官方基线: ponwrt 自带 configs/an7581.config + configs/release.config
         #    （含 UBIFS / initramfs / squashfs / 内核参数等镜像级设置，手写种子缺失会编出不能启动的镜像）
@@ -210,11 +182,8 @@ jobs:
         echo "===== 目标相关行 ====="
         grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE)=' .config
         grep -E 'nokia_xg-040g-md-ubi=y$' .config || true
-        # ---- ccache: 编译器对象缓存, 跨构建复用已编译的 .o ----
-        # Config.in / Config-build.in 里没有 "config CCACHE" 这个符号, 探测式永远不成立
-        # (实测连续几轮都是 warning)。rules.mk 判的是 make 变量 CONFIG_CCACHE,
-        # 直接写进 .config 即可, 但不要紧跟 make defconfig —— kconfig 认不得这个符号, 会把它清掉。
-        # 可用性由后面的 Handle toolchain 校验: ccache 起不来就删掉这行并回退。
+        # ccache：rules.mk 判的是 make 变量 CONFIG_CCACHE，直接写 .config；
+        # 不能紧跟 make defconfig（kconfig 会清掉）。可用性在 Handle toolchain 校验
         if ! grep -q '^CONFIG_CCACHE=y' .config; then
           echo 'CONFIG_CCACHE=y' >> .config
         fi
@@ -285,56 +254,63 @@ jobs:
         echo "----- 插件 -----"
         need CONFIG_PACKAGE_luci-theme-argon
         need CONFIG_PACKAGE_luci-app-airoha-npu
-        need CONFIG_PACKAGE_luci-app-onu
-        need CONFIG_PACKAGE_luci-app-pon-status
-        echo "----- 状态-用户列表(oaf_status) 的 Lua 运行时 -----"
-        # files/ 里的 oaf_status 是 Lua 版插件（controller/model.cbi/view.htm）。
-        # 缺下面任一包，页面会 404 或整棵页面树构建失败（lua bridge 报错）。
+        need CONFIG_PACKAGE_luci-app-pon
+        echo "----- OAF: 官方三件套 -----"
+        need CONFIG_PACKAGE_kmod-oaf
+        need CONFIG_PACKAGE_appfilter
+        need CONFIG_PACKAGE_luci-app-oaf
+        need CONFIG_PACKAGE_libuci-lua
+        # luci-app-oaf 是 Lua 插件，PonWrt 默认纯 ucode LuCI，需要兼容层才能加载
         need CONFIG_PACKAGE_luci-compat
         need CONFIG_PACKAGE_ucode-mod-lua
         need CONFIG_PACKAGE_luci-lib-jsonc
         need CONFIG_PACKAGE_luci-lib-nixio
-        echo "----- 状态-用户列表(oaf_status) 的 OAF 识别内核 -----"
-        # kmod-oaf 写 conntrack 应用标记、导出 /proc/net/af_*；
-        # appfilter 提供 oafd + 特征库 + /etc/init.d/appfilter，维护 /tmp/oaf/client.db。
-        # 缺这两个，用户列表只剩流量，APP 名与访问记录全空。
-        need CONFIG_PACKAGE_kmod-oaf
-        need CONFIG_PACKAGE_appfilter
-        need CONFIG_PACKAGE_libuci-lua
-        # 源码目录必须在（diy-part2 从 destan19/OpenAppFilter 克隆）
-        for d in package/OpenAppFilter/oaf package/OpenAppFilter/open-app-filter; do
+        for d in package/OpenAppFilter/oaf package/OpenAppFilter/open-app-filter package/OpenAppFilter/luci-app-oaf; do
           if [ -f "$d/Makefile" ]; then echo "✅ $d"; else echo "❌ 缺少 $d"; ok=0; fi
         done
-        if [ -d package/OpenAppFilter/luci-app-oaf ]; then
-          echo "❌ luci-app-oaf 界面未删除（会和自研插件菜单重复）"; ok=0
-        else
-          echo "✅ luci-app-oaf 界面已删除"
-        fi
         echo "----- UPnP -----"
         need CONFIG_PACKAGE_luci-app-upnp
         need CONFIG_PACKAGE_miniupnpd-nftables
-        echo "----- 已移除的第三方插件（不应被任何依赖带回 .config）-----"
+        echo "----- 已移除 / 不编入的插件（不应被任何依赖带回 .config）-----"
         absent() {
           if grep -qE "^$1=[ym]$" .config; then echo "❌ $1 仍被选中"; ok=0;
           else echo "✅ $1 未编入"; fi
         }
-        for sym in CONFIG_PACKAGE_luci-app-oaf CONFIG_PACKAGE_luci-app-appfilter \
+        for sym in CONFIG_PACKAGE_luci-app-iptv CONFIG_PACKAGE_luci-app-onu \
+                   CONFIG_PACKAGE_luci-app-pon-status CONFIG_PACKAGE_luci-app-appfilter \
                    CONFIG_PACKAGE_mosdns CONFIG_PACKAGE_luci-app-mosdns \
                    CONFIG_PACKAGE_geo2txt CONFIG_PACKAGE_v2ray-geoip \
                    CONFIG_PACKAGE_v2ray-geosite; do
           absent "$sym"
         done
+        echo "----- feeds: pon_userspace 必须是上游 pbs05 -----"
+        if grep -q 'naoki66/OpenWrt_ONU_CONFIG' feeds.conf.default; then
+          echo "❌ feeds.conf.default 仍指向 naoki66/OpenWrt_ONU_CONFIG"; ok=0
+        else
+          echo "✅ 无 naoki66/OpenWrt_ONU_CONFIG 引用"
+        fi
+        if grep -q '^src-git pon_userspace .*pbs05/openwrt-pon-userspace' feeds.conf.default; then
+          echo "✅ pon_userspace -> pbs05/openwrt-pon-userspace"
+        else
+          echo "❌ pon_userspace 不是上游 pbs05 源: $(grep '^src-git pon_userspace' feeds.conf.default || echo 未出现)"; ok=0
+        fi
+        grep -E '^src-git pon_(userspace|drivers)' feeds.conf.default | sed 's/^/   /' || true
         echo "----- files/ 叠加层 -----"
-        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd etc/shadow \
-                 etc/config/onu-internet etc/internet.nft etc/iptv.nft etc/apk/config \
-                 etc/uci-defaults/99-040g-md; do
+        for f in etc/config/network etc/config/pon etc/config/firewall etc/config/upnpd \
+                 etc/shadow etc/fwxd/feature.bin etc/apk/config etc/apk/repositories; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
-        # apk 必须关掉签名校验
-        if grep -qx 'allow-untrusted' files/etc/apk/config 2>/dev/null; then
-          echo "✅ apk 已关闭签名校验 (allow-untrusted)"
+        echo "----- apk 签名校验关闭 + 软件源 -----"
+        if grep -qx 'allow-untrusted' files/etc/apk/config; then
+          echo "✅ apk allow-untrusted"
         else
-          echo "❌ files/etc/apk/config 里没有 allow-untrusted"; ok=0
+          echo "❌ files/etc/apk/config 未关闭签名校验"; ok=0
+        fi
+        repos=$(grep -cE '^https?://.+/packages\.adb$' files/etc/apk/repositories 2>/dev/null || echo 0)
+        if [ "$repos" -eq 14 ]; then
+          echo "✅ 软件源 $repos 条"
+        else
+          echo "❌ 软件源条数异常 (repos=$repos, 期望 14)"; ok=0
         fi
         # OMCI 设置 → 兼容性 → OMCC 版本，出厂默认 0x86
         if grep -q "option omcc_version '0x86'" files/etc/config/pon 2>/dev/null; then
@@ -342,61 +318,22 @@ jobs:
         else
           echo "❌ files/etc/config/pon 里 omcc_version 不是 0x86"; ok=0
         fi
-        echo "----- 状态-用户列表 (oaf_status)：前端 / 后端 / OUI / 采样器 -----"
-        for f in usr/lib/lua/luci/controller/oaf_status_users.lua \
-                 usr/lib/lua/luci/model/cbi/oaf_status/user_list.lua \
-                 usr/lib/lua/luci/model/cbi/oaf_status/user_detail.lua \
-                 usr/lib/lua/luci/view/oaf_status/user_list.htm \
-                 usr/lib/lua/luci/view/oaf_status/user_detail.htm \
-                 usr/lib/lua/luci/oaf_traffic.lua \
-                 usr/lib/lua/luci/oaf_app_names.lua \
-                 usr/lib/lua/luci/i18n/oaf_status.zh-cn.lmo \
-                 etc/init.d/oaf-flowd etc/uci-defaults/99-oaf-status-defaults \
-                 usr/sbin/oaf-flowd usr/share/oaf_status/vendors.json \
-                 www/luci-static/resources/oaf_status/oaf_icon.js \
-                 www/luci-static/resources/oaf_status/common.js \
-                 www/luci-static/resources/oaf_status/echarts.min.js \
-                 www/luci-static/resources/oui/oui.js; do
-          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
-        done
-        # 采样器必须是本机架构的静态 ELF（aarch64 → e_machine 在偏移 18，小端 b7 00）
-        if [ -x files/usr/sbin/oaf-flowd ] &&
-           [ "$(head -c20 files/usr/sbin/oaf-flowd | tail -c2 | od -An -tx1 | tr -d ' \n')" = "b700" ]; then
-          echo "✅ oaf-flowd 是 aarch64 ELF"
+        echo "----- files/ 里不应再有任何自研 OAF 产物（界面改用官方 luci-app-oaf）-----"
+        leftover=$(find files -type f \( -name 'oaf-flowd' -o -name 'oaf_traffic.lua' \
+                    -o -name 'oaf_app_names.lua' -o -name 'oaf_status_users.lua' \
+                    -o -path '*oaf_status*' -o -path '*rpcd/ucode/luci' \
+                    -o -path '*view/status/include/10_system.js' \) 2>/dev/null | head -5)
+        if [ -n "$leftover" ]; then
+          echo "❌ files/ 里仍有自研 OAF / CPU 采样器残留:"; echo "$leftover" | sed 's/^/   /'; ok=0
         else
-          echo "❌ oaf-flowd 不是可执行的 aarch64 ELF"; ok=0
+          echo "✅ files/ 无 oaf_status / oaf-flowd / oaf_traffic / 10_system.js 残留"
         fi
-        # OUI 厂商库 + 应用图标（缺了列表就只剩 MAC）
-        oui_json=$(ls files/www/luci-static/resources/oui/vendors-*.json 2>/dev/null | wc -l)
-        icons=$(ls files/www/luci-static/resources/oaf_status/app_icons/*.png 2>/dev/null | wc -l)
-        if [ "$oui_json" -ge 1 ] && [ "$icons" -ge 500 ]; then
-          echo "✅ OUI 库 $oui_json 个 + 应用图标 $icons 个"
+        # OAF 官方界面的应用图标（562 个；路径与 luci-app-oaf 的 resources/oaf 一致）
+        icons=$(ls files/www/luci-static/resources/oaf/app_icons/*.png 2>/dev/null | wc -l)
+        if [ "$icons" -ge 500 ]; then
+          echo "✅ OAF 应用图标 $icons 个"
         else
-          echo "❌ OUI 库/应用图标缺失 (oui=$oui_json icons=$icons)"; ok=0
-        fi
-        # 实时 CPU 占用：rpcd 的 ucode 脚本 + overview 前端（两者必须同时存在，
-        # 只改后端则数字不刷新，只改前端则首屏拿不到值）
-        for f in usr/share/rpcd/ucode/luci \
-                 www/luci-static/resources/view/status/include/10_system.js; do
-          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
-        done
-        if grep -q 'function selfTicks' files/usr/share/rpcd/ucode/luci 2>/dev/null &&
-           grep -q "sprintf('%d%%'" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
-          echo "✅ CPU 占用为实时采样（已扣除采样器自身占用）"
-        else
-          echo "❌ files/usr/share/rpcd/ucode/luci 不是实时 CPU 采样版本"; ok=0
-        fi
-        if grep -q 'PPE:' files/usr/share/rpcd/ucode/luci 2>/dev/null ||
-           grep -q "sprintf('CPU" files/usr/share/rpcd/ucode/luci 2>/dev/null; then
-          echo "❌ CPU 行带了额外前缀（应只显示 0% 这样的纯百分比）"; ok=0
-        else
-          echo "✅ CPU 行只显示纯百分比（无 CPU: / PPE 前缀）"
-        fi
-        if grep -q 'poll.add' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null &&
-           grep -q 'document.hidden' files/www/luci-static/resources/view/status/include/10_system.js 2>/dev/null; then
-          echo "✅ overview 的 CPU 行 3 秒轮询 + 页面不可见时停采"
-        else
-          echo "❌ 10_system.js 缺少轮询或可见性判断"; ok=0
+          echo "❌ OAF 应用图标缺失 (icons=$icons)"; ok=0
         fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
@@ -416,9 +353,7 @@ jobs:
         echo "CACHE_KEY=toolchain-airoha-an7581-${TOOLS_HASH:0:16}" >> $GITHUB_OUTPUT
         echo "CACHE_PREFIX=toolchain-airoha-an7581" >> $GITHUB_OUTPUT
         echo "缓存键: toolchain-airoha-an7581-${TOOLS_HASH:0:16}"
-        # ---- 二次利用: dl 源码包 + ccache 的缓存键 ----
-        # dl 按月轮转 / ccache 按 ISO 周轮转: 同周期内精确命中即不重复保存,
-        # 避免每次构建都写一条新缓存把 10GB 配额挤爆、反过来淘汰工具链缓存。
+        # dl 按月、ccache 按 ISO 周轮转，同周期内命中即不重复保存，避免挤爆 10GB 配额
         echo "CACHE_TAG=airoha-an7581" >> $GITHUB_OUTPUT
         echo "DL_KEY=dl-airoha-an7581-$(date -u +%Y%m)" >> $GITHUB_OUTPUT
         echo "CC_KEY=ccache-airoha-an7581-$(date -u +%G-W%V)" >> $GITHUB_OUTPUT
@@ -484,11 +419,7 @@ jobs:
         fi
         sed -i 's/ $(tool.*\/stamp-compile)//' Makefile
         echo "Makefile 已修改: 后续跳过工具链重编译"
-        # ---- ccache: PATH 与 staging 两个通道都要通, 否则回退关闭 ----
-        # 1) rules.mk:  TARGET_CC := ccache $(TARGET_CC)                         → 走 PATH
-        # 2) cmake.mk:  -DCMAKE_C_COMPILER_LAUNCHER=$(STAGING_DIR_HOST)/bin/ccache → 绝对路径
-        # 上一版只校验 PATH, 结果 cmake 包 (libnl-tiny / fwtool 等) 编译期报
-        #   /bin/sh: .../staging_dir/host/bin/ccache: not found  → Error 127
+        # ccache 两个通道都要通：rules.mk 走 PATH，cmake.mk 用 staging_dir 绝对路径
         if grep -q '^CONFIG_CCACHE=y' .config 2>/dev/null; then
           SYSCC=$(command -v ccache 2>/dev/null || true)
           mkdir -p staging_dir/host/bin
@@ -594,11 +525,7 @@ jobs:
         df -hT /
         # 原写法 make -j || make -j1 || make -j1 V=s: 磁盘写满时也会重试两次, 白耗十几分钟
         echo "起始资源:"; free -m | head -2; df -hT / | tail -1
-        # run 42329431482: 编译到 ~120 分钟时 hosted runner 直接失联, 该步骤永远
-        # 停在 in_progress, 连日志 blob 都没上传 (API 下载报 BlobNotFound), 产物 0 个。
-        # 原写法 make ... 2>&1 | tee 把几十万行编译输出实时灌进 Actions 日志流,
-        # runner 要一直扛日志上传。现在只写文件, 前台改用 60s 心跳保持输出,
-        # 同时留下内存/磁盘曲线 —— 再掉线就能区分是 OOM 还是磁盘写满。
+        # 编译输出只写文件，前台用心跳保活，避免日志流把 runner 拖垮
         set +e
         make -j$(nproc) > /tmp/build.log 2>&1 &
         mkpid=$!
@@ -750,7 +677,7 @@ jobs:
           echo "| 每流统计 | CONFIG_NET_AIROHA_FLOW_STATS=y |"
           echo "| PON | airoha-xpon + pon-frontend + en7572 |"
           echo "| 2.5G | phy-airoha-en8811h (lan1) |"
-          echo "| 插件 | luci-app-onu / luci-app-airoha-npu / argon v3.1.1 |"
+          echo "| 插件 | luci-app-pon / luci-app-oaf / luci-app-airoha-npu / argon v3.1.1 |"
           echo "| 时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
         } > release.txt
 
