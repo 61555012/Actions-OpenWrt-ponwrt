@@ -306,11 +306,11 @@ jobs:
         else
           echo "❌ files/etc/apk/config 未关闭签名校验"; ok=0
         fi
-        repos=$(grep -cE '^https?://.+/packages\.adb$' files/etc/apk/repositories 2>/dev/null || echo 0)
-        if [ "$repos" -eq 14 ]; then
-          echo "✅ 软件源 $repos 条"
+        repos=$(grep -cE '^https?://.+/packages\.adb$' files/etc/apk/repositories 2>/dev/null || :)
+        if [ "$repos" -eq 6 ] && ! grep -qvE '^(#|$|https://mirrors\.pku\.edu\.cn/.+/packages\.adb$)' files/etc/apk/repositories; then
+          echo "✅ 软件源 $repos 条（仅 PKU 镜像）"
         else
-          echo "❌ 软件源条数异常 (repos=$repos, 期望 14)"; ok=0
+          echo "❌ 软件源异常 (repos=$repos, 期望 6 且只含 mirrors.pku.edu.cn)"; ok=0
         fi
         # OMCI 设置 → 兼容性 → OMCC 版本，出厂默认 0x86
         if grep -q "option omcc_version '0x86'" files/etc/config/pon 2>/dev/null; then

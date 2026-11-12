@@ -16,7 +16,7 @@ files/                                         # 原样合并进固件根目录
   etc/config/{network,pon,firewall,upnpd}      # 实机配置（PPPoE、光猫注册、UPnP、加速开关）
   etc/shadow                                   # root 密码
   etc/fwxd/feature.bin                         # OAF 应用特征库
-  etc/apk/{config,repositories}                # 关签名校验 + 14 条软件源
+  etc/apk/{config,repositories}                # 关签名校验 + PKU 软件源 6 条
   www/luci-static/resources/oaf/app_icons/     # OAF 界面的 562 个应用图标
 ```
 
@@ -113,9 +113,9 @@ feeds 里自带同名 `luci-theme-argon`（v2 系列）。在 `feeds install` �
 `files/etc/apk/config` 写着 `allow-untrusted`，装机后 `apk add` 不再校验签名
 （等价于每条命令自带 `--allow-untrusted`；apk 只认命令行开关，这个文件是唯一能持久化的位置）。
 
-`files/etc/apk/repositories` 覆盖镜像自带的软件源，共 14 条：PKU 镜像的
-immortalwrt 快照（`an7583` 目标源 + `aarch64_cortex-a53` 的 base/luci/packages/routing/telephony）
-在前，`downloads.openwrt.org` 的 `an7581` 目标源与 video 等在后。
+`files/etc/apk/repositories` 覆盖镜像自带的软件源，只留 PKU 的 immortalwrt 快照 6 条：
+`an7583` 目标源 + `aarch64_cortex-a53` 的 base / luci / packages / routing / telephony。
+不混用 `downloads.openwrt.org`，避免同名包来自两个快照导致依赖解析打架。
 
 ### 8. dummy 接口
 
