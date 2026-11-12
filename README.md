@@ -114,7 +114,7 @@ feeds 里自带同名 `luci-theme-argon`（v2 系列）。在 `feeds install` �
 （等价于每条命令自带 `--allow-untrusted`；apk 只认命令行开关，这个文件是唯一能持久化的位置）。
 
 `files/etc/apk/repositories` 覆盖镜像自带的软件源，只留 PKU 的 immortalwrt 快照 6 条：
-`an7583` 目标源 + `aarch64_cortex-a53` 的 base / luci / packages / routing / telephony。
+`an7581` 目标源 + `aarch64_cortex-a53` 的 base / luci / packages / routing / telephony。
 不混用 `downloads.openwrt.org`，避免同名包来自两个快照导致依赖解析打架。
 
 ### 8. dummy 接口
