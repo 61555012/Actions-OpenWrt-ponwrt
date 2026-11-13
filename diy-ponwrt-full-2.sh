@@ -26,17 +26,20 @@ else
   echo "❌ 找不到 openwrt 源码树 (feeds.conf.default)"; exit 1
 fi
 
-# 0) OAF：官方三件套，不 patch、不魔改
+# 0) OAF：后端保留（oaf.ko + appfilter/oafd），官方 Lua 界面不编入
+#    界面换成 files/ 里的 oaf_status（用户列表 + 终端详情），所以
+#    luci-app-oaf 目录直接删掉——留着也不会被选中，但删干净更好排错。
 #    清掉旧的同名目录，避免与 feeds 里的软链冲突
-echo "==== [diy-part2] OAF: 拉最新官方源码 (oaf.ko + open-app-filter + luci-app-oaf) ===="
+echo "==== [diy-part2] OAF: 拉最新官方源码（保留 oaf.ko + open-app-filter，去掉 luci-app-oaf）===="
 find . -type d \( -name "OpenAppFilter" -o -name "luci-app-oaf" -o -name "open-app-filter" \) \
 	-exec rm -rf {} + 2>/dev/null || true
 rm -rf package/feeds/*/luci-app-oaf package/feeds/*/OpenAppFilter
 git clone --depth 1 https://github.com/destan19/OpenAppFilter package/OpenAppFilter
 OAFC=$(git -C package/OpenAppFilter rev-parse --short HEAD 2>/dev/null || echo '?')
 echo "    官方 OAF commit: ${OAFC}"
+rm -rf package/OpenAppFilter/luci-app-oaf
 OAF_MISS=0
-for d in oaf open-app-filter luci-app-oaf; do
+for d in oaf open-app-filter; do
   if [ -f "package/OpenAppFilter/$d/Makefile" ]; then
     echo "    ✅ package/OpenAppFilter/$d"
   else

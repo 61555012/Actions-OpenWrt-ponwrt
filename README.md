@@ -17,7 +17,15 @@ files/                                         # 原样合并进固件根目录
   etc/shadow                                   # root 密码
   etc/fwxd/feature.bin                         # OAF 应用特征库
   etc/apk/{config,repositories}                # 关签名校验 + PKU 软件源 6 条
-  www/luci-static/resources/oaf/app_icons/     # OAF 界面的 562 个应用图标
+  www/luci-static/resources/oaf/app_icons/     # 562 个应用图标（oaf_status 复用）
+  usr/lib/lua/luci/controller/oaf_status_users.lua   # oaf_status 控制器（状态 → 用户列表）
+  usr/lib/lua/luci/view/oaf_status/*.htm             # 用户列表 / 终端详情两页
+  usr/lib/lua/luci/oaf_traffic.lua                   # 硬件加速安全的流量口径
+  usr/lib/lua/oaf_ctstat.lua                         # conntrack 采集器（1 Hz 快照 + DESTROY 事件）
+  etc/init.d/oaf-ctstat                              # 采集器服务（procd）
+  usr/share/oaf_status/vendors.json                  # OUI 厂商表（8712 前缀）
+  www/luci-static/resources/oui/                     # 厂商图标识别（oui.js + 35 个 SVG + 前缀库）
+  www/cgi-bin/oaf-live                               # 1 秒快车道（sh + cat，30 ms）
 ```
 
 ## 编译出来的东西
@@ -31,9 +39,11 @@ files/                                         # 原样合并进固件根目录
 | PON / 光模块 | `kmod-airoha-xpon` + `kmod-airoha-pon-frontend` + `kmod-airoha-en7572` + `airoha-pond` / `airoha-ponctl`，全部 `=y` |
 | 2.5G 网口 | `kmod-phy-airoha-en8811h` + `airoha-en8811h-firmware`，`=y`（lan1，`2500base-x`） |
 | UPnP | `miniupnpd-nftables` + `luci-app-upnp` |
-| OAF | 官方 [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) 原样编译：`kmod-oaf` + `appfilter` + `luci-app-oaf` |
+| OAF 后端 | 官方 [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) 原样编译：`kmod-oaf`（特征库）+ `appfilter`（oafd，ubus `fwx`） |
+| OAF 前端 | 本仓库 `files/` 里的 `oaf_status`：**状态 → 用户列表 / 终端详情**。官方 `luci-app-oaf` 界面不再编入（目录在 diy-part2 里直接删掉） |
+| OAF 采集器 | `oaf_ctstat.lua` + `oaf-ctstat` 服务：conntrack 快照 + `conntrack -E DESTROY` 事件，硬件加速下流量仍然准（OAF 自己的 netfilter 钩子在 offload 后看不到包） |
 | 其他插件 | `luci-app-pon`（上游 pbs05）、`luci-app-airoha-npu`（[luanmuc](https://github.com/luanmuc/luci-app-airoha-npu)）、`argon v3.1.1` |
-| 不编入 | `luci-app-iptv`、mosdns 整套、`kmod-dummy`；无线栈 `kmod-mac80211` / `kmod-cfg80211` / `kmod-mt76-core` / `-connac` / `wpad-openssl` / `hostapd-common` / `wifi-scripts` / `wireless-regdb` |
+| 不编入 | `luci-app-oaf`（官方界面）、`luci-app-iptv`、mosdns 整套、`kmod-dummy`；无线栈 `kmod-mac80211` / `kmod-cfg80211` / `kmod-mt76-core` / `-connac` / `wpad-openssl` / `hostapd-common` / `wifi-scripts` / `wireless-regdb`（`wpad` 是 kconfig choice，`defconfig` 会挑一个成员并带回 `hostapd-common`，校验只提示不判失败） |
 | OMCI 兼容性 | `omcc_version` 出厂默认 `0x86` |
 
 ## 关键设计

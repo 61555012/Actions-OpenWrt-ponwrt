@@ -1,0 +1,6 @@
+#!/bin/sh
+# 首启把 oaf_ctstat 采集器挂上（procd），它只写 tmpfs /tmp/oaf-flow
+/etc/init.d/oaf-ctstat enable
+/etc/init.d/oaf-ctstat start
+
+exit 0

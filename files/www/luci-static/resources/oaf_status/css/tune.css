@@ -1,0 +1,290 @@
+/* tune.css — 用户列表 / 设备详情 统一版式
+   1) 间距重排：一套 CSS 变量管住卡片、标签页、图表、表格、弹窗
+   2) 手机端：窄屏单列、图表降高、表格交给自己的容器横向滚
+   3) 暗黑模式：Argon 的 data-darkmode="true" 由页首脚本镜像过来
+   4) 设备头像：认不出 OUI 的手机/电脑与有 logo 的一致，黑白灰，无蓝色
+   本文件在 common.css 之后、页面内联 <style> 之前加载，所以关键的覆盖
+   一律带 !important，避免被后面同特异性的旧规则改回去。 */
+
+:root {
+	--oaf-gap: 12px;
+	--oaf-gap-lg: 18px;
+	--oaf-gap-xl: 24px;
+	--oaf-pad: 14px;
+	--oaf-radius: 10px;
+	--oaf-line: rgba(148, 163, 184, 0.28);
+	--oaf-surface: rgba(255, 255, 255, 0.55);
+	--oaf-text: #1f2937;
+	--oaf-muted: #64748b;
+}
+
+[data-darkmode="true"] {
+	--oaf-line: rgba(255, 255, 255, 0.14);
+	--oaf-surface: rgba(255, 255, 255, 0.035);
+	--oaf-text: #e8eaed;
+	--oaf-muted: #9aa3ad;
+}
+
+/* ---------------------------------------------------------------- 间距 */
+.cbi-map,
+.cbi-section { margin-bottom: var(--oaf-gap-lg) !important; }
+.cbi-section { padding: var(--oaf-pad) !important; }
+.cbi-map > .cbi-section:last-child { margin-bottom: 0 !important; }
+
+/* 原页面把内容塞进 max-height:1000px 的滚动区，桌面多一层滚动条、
+   手机上还会把整页截成两截。交给页面本身滚动，表格只在自己的容器里横向滚。 */
+.user-status-content {
+	max-height: none !important;
+	overflow-y: visible !important;
+	overflow-x: visible !important;
+	padding-right: 0 !important;
+}
+.user-table-wrapper {
+	overflow-x: auto !important;
+	-webkit-overflow-scrolling: touch;
+	border-radius: var(--oaf-radius);
+}
+
+.user-view-toolbar { margin: 0 0 var(--oaf-gap) !important; gap: 8px !important; }
+#pagination { margin: var(--oaf-gap-lg) 0 var(--oaf-gap) !important; }
+
+.user-card {
+	margin: 0 0 var(--oaf-gap) !important;
+	padding: var(--oaf-pad) !important;
+	border-radius: var(--oaf-radius) !important;
+	box-sizing: border-box;
+}
+.user-card-head { margin-bottom: var(--oaf-gap) !important; }
+.user-card-body { gap: 4px !important; }
+.user-card-line { gap: var(--oaf-gap) !important; min-height: 26px; }
+.user-card-actions {
+	margin-top: var(--oaf-gap) !important;
+	padding-top: var(--oaf-gap) !important;
+	border-top: 1px solid var(--oaf-line);
+}
+
+.user-detail-header { margin-bottom: var(--oaf-gap) !important; gap: var(--oaf-gap) !important; }
+.tab-list {
+	margin: 0 0 var(--oaf-gap-lg) !important;
+	gap: 6px !important;
+	flex-wrap: wrap !important;
+}
+.tab-item { padding: 8px 14px !important; }
+.tab-body { padding: var(--oaf-gap) 0 var(--oaf-gap-lg) !important; }
+.bar-chart, .pie-chart { margin-bottom: var(--oaf-gap) !important; }
+.history-traffic-panel,
+.app-traffic-panel,
+.history-summary {
+	padding: var(--oaf-pad) !important;
+	border-radius: var(--oaf-radius) !important;
+	box-sizing: border-box;
+}
+.history-traffic-panel,
+.app-traffic-panel { border: 1px solid var(--oaf-line); }
+.history-summary { gap: var(--oaf-gap) !important; }
+.history-caption { margin-bottom: var(--oaf-gap) !important; }
+.app-legend { gap: 6px 12px !important; margin-top: var(--oaf-gap) !important; }
+.modal-content { padding: var(--oaf-pad) !important; border-radius: var(--oaf-radius) !important; }
+
+/* ---------------------------------------------------------------- 头像：黑白 */
+/* 认不出 OUI 的设备（随机 MAC / 私有地址）原来是蓝色系彩色底 + 白线稿，
+   与有 logo 的白底黑标完全是两套视觉。统一成白底深灰描边；品牌 logo
+   仍铺一层白底，暗色模式下整体反相，保持同一套黑白灰。 */
+.user-device-icon.user-device-icon-vendor {
+	background: #ffffff !important;
+	color: #334155 !important;
+	border: 1px solid rgba(15, 23, 42, 0.14) !important;
+}
+.user-device-icon.user-device-icon-vendor svg { color: inherit; }
+.user-device-logo { background: #fff !important; }
+
+[data-darkmode="true"] .user-device-icon.user-device-icon-vendor {
+	background: #2b3038 !important;
+	color: #e5e7eb !important;
+	border-color: rgba(255, 255, 255, 0.18) !important;
+}
+/* 白底黑标 -> 黑底白标，仍是纯黑白 */
+[data-darkmode="true"] .user-device-logo {
+	filter: invert(1) grayscale(1);
+}
+
+/* 连接数里的 IPv6 份额 */
+.flows6-chip {
+	display: inline-block;
+	margin-left: 4px;
+	padding: 0 3px;
+	border-radius: 3px;
+	background: rgba(100, 116, 139, 0.16);
+	color: #64748b;
+	font-size: 9px;
+	font-weight: 700;
+	line-height: 1.45;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+[data-darkmode="true"] .flows6-chip {
+	background: rgba(203, 213, 225, 0.18);
+	color: #cbd5e1;
+}
+
+/* ---------------------------------------------------------------- 暗黑模式 */
+[data-darkmode="true"] .cbi-section,
+[data-darkmode="true"] .cbi-tblsection,
+[data-darkmode="true"] .cbi-map {
+	background: var(--oaf-surface) !important;
+	border-color: var(--oaf-line) !important;
+	color: var(--oaf-text) !important;
+}
+[data-darkmode="true"] .user-card,
+[data-darkmode="true"] .history-sum-item,
+[data-darkmode="true"] .app-legend-item {
+	background: var(--oaf-surface) !important;
+	border-color: var(--oaf-line) !important;
+	color: var(--oaf-text) !important;
+}
+[data-darkmode="true"] .user-card-label,
+[data-darkmode="true"] .history-sum-label,
+[data-darkmode="true"] .history-caption,
+[data-darkmode="true"] .visit-hint,
+[data-darkmode="true"] .user-card-ip { color: var(--oaf-muted) !important; }
+[data-darkmode="true"] .user-card-title,
+[data-darkmode="true"] .user-card-value,
+[data-darkmode="true"] .history-sum-value,
+[data-darkmode="true"] .user-detail-title { color: var(--oaf-text) !important; }
+
+[data-darkmode="true"] .cbi-section-table th.th,
+[data-darkmode="true"] .cbi-section-table td.td,
+[data-darkmode="true"] #user_status_table th.th,
+[data-darkmode="true"] #user_status_table td.td {
+	color: var(--oaf-text) !important;
+	border-color: var(--oaf-line) !important;
+}
+[data-darkmode="true"] .cbi-section-table tr.tr,
+[data-darkmode="true"] #user_status_table tr.tr { border-color: var(--oaf-line) !important; }
+[data-darkmode="true"] .cbi-section-table tr.table-titles,
+[data-darkmode="true"] #user_status_table tr:first-child { background: rgba(255, 255, 255, 0.045) !important; }
+
+[data-darkmode="true"] .tab-list { border-color: var(--oaf-line) !important; }
+[data-darkmode="true"] .tab-item {
+	color: #cbd5e1 !important;
+	border-color: var(--oaf-line) !important;
+	background: rgba(255, 255, 255, 0.03) !important;
+}
+[data-darkmode="true"] .tab-item.active {
+	background: rgba(255, 255, 255, 0.12) !important;
+	color: #ffffff !important;
+}
+[data-darkmode="true"] .modal-content,
+[data-darkmode="true"] .common-modal-content {
+	background: #20242b !important;
+	color: var(--oaf-text) !important;
+	border-color: var(--oaf-line) !important;
+}
+[data-darkmode="true"] .modal-close,
+[data-darkmode="true"] .detail-back-link { color: var(--oaf-text) !important; }
+[data-darkmode="true"] .view-mode-btn {
+	background: rgba(255, 255, 255, 0.06) !important;
+	border-color: var(--oaf-line) !important;
+	color: var(--oaf-text) !important;
+}
+[data-darkmode="true"] .user-status-label.offline,
+[data-darkmode="true"] .user-card-status.offline { color: var(--oaf-muted) !important; }
+[data-darkmode="true"] .user-status-label.online,
+[data-darkmode="true"] .user-card-status.online { color: #9dd0ff !important; }
+[data-darkmode="true"] #traffic-tooltip {
+	background: #20242b !important;
+	color: var(--oaf-text) !important;
+	border-color: var(--oaf-line) !important;
+}
+[data-darkmode="true"] .history-empty,
+[data-darkmode="true"] .user-card-empty { color: var(--oaf-muted) !important; }
+[data-darkmode="true"] .v6-chip {
+	background: rgba(203, 213, 225, 0.18) !important;
+	color: #cbd5e1 !important;
+}
+[data-darkmode="true"] .user-card-up { color: #8ab4f8 !important; }
+[data-darkmode="true"] .user-card-down { color: #6ee7a2 !important; }
+[data-darkmode="true"] .rate-v4[style*="#60a5fa"] { color: #8ab4f8 !important; }
+[data-darkmode="true"] .rate-v4[style*="#22c55e"] { color: #6ee7a2 !important; }
+
+/* ---------------------------------------------------------------- 手机端 */
+@media (max-width: 768px) {
+	:root { --oaf-gap: 10px; --oaf-gap-lg: 14px; --oaf-pad: 10px; }
+	.cbi-section { padding: var(--oaf-pad) !important; }
+	.user-status-content { padding: 0 !important; }
+	.user-table-wrapper { border-radius: 8px; }
+	#user_status_table { min-width: 1080px !important; }
+	.user-card-grid, .user-card-row { padding: 0 !important; gap: var(--oaf-gap) !important; }
+	.user-card { width: 100% !important; margin-bottom: var(--oaf-gap) !important; }
+	.user-card-line { font-size: 12px !important; }
+	.user-detail-header { flex-wrap: wrap !important; }
+	.user-detail-title { font-size: 15px !important; }
+	.tab-list { gap: 4px !important; }
+	.tab-item { padding: 7px 10px !important; font-size: 12px !important; }
+	.tab-body { padding: var(--oaf-gap) 0 var(--oaf-gap-lg) !important; }
+	#hourly_traffic_chart,
+	#hourly_apps_chart,
+	#app_time_chart,
+	#history_traffic_chart { height: 280px !important; }
+	.history-summary { flex-wrap: wrap !important; }
+	.history-sum-item { flex: 1 1 28% !important; min-width: 90px !important; }
+	.user-basic-info-table th.td,
+	.user-basic-info-table td.td { padding: 6px 8px !important; font-size: 12px !important; }
+
+	/* 页面内联样式把标签列钉成 min-width:7em + nowrap，390px 下「今日上网
+	   时长」正好差几个像素，被 Argon 的 ellipsis 截成「今日上网…」。窄屏
+	   把标签列固定成 84px、字号降 1px、去掉省略号：六字标签 66px + 内边距
+	   正好放得下，值列吃掉剩下的宽度。 */
+	.user-basic-info-table .td:nth-child(1),
+	.user-basic-info-table .td:nth-child(3) {
+		width: 84px !important;
+		min-width: 84px !important;
+		max-width: 84px !important;
+		flex: 0 0 84px !important;
+		white-space: nowrap !important;
+		overflow: visible !important;
+		text-overflow: clip !important;
+		font-size: 11px !important;
+		padding-left: 6px !important;
+		padding-right: 4px !important;
+	}
+	.user-basic-info-table .td:nth-child(2),
+	.user-basic-info-table .td:nth-child(4) {
+		flex: 1 1 auto !important;
+		min-width: 0 !important;
+		overflow: visible !important;
+		text-overflow: clip !important;
+		word-break: break-all;
+	}
+
+	/* 标题里带 MAC，「终端详情(e0:51:d8:14:6a:4c)」15px 在 390px 上放不下，
+	   缩到 13px 一行能放下，比截成两行半截 MAC 好认 */
+	.user-detail-title {
+		font-size: 13px !important;
+		white-space: nowrap !important;
+		overflow: hidden !important;
+		text-overflow: ellipsis !important;
+		min-width: 0;
+	}
+	.modal-content {
+		width: 94% !important;
+		height: auto !important;
+		max-height: 88vh !important;
+		padding: var(--oaf-pad) !important;
+	}
+	#detailsModal > .modal-content,
+	#nicknameModal > .modal-content { min-height: 0 !important; }
+	.app-legend { gap: 6px 8px !important; }
+	.app-traffic-panel, .history-traffic-panel { overflow-x: auto; }
+}
+
+@media (max-width: 480px) {
+	#hourly_traffic_chart,
+	#hourly_apps_chart,
+	#app_time_chart,
+	#history_traffic_chart { height: 240px !important; }
+	.user-card-line { gap: 8px !important; }
+	.tab-item { padding: 6px 8px !important; font-size: 11px !important; }
+	.history-sum-item { flex: 1 1 45% !important; }
+	.view-mode-btn { padding: 6px 10px !important; }
+}

@@ -2,15 +2,18 @@
 # 源码: pbs05/ponwrt (master) | 机型: Nokia XG-040G-MD (UBI) / airoha an7581
 # 配置: 官方 configs/an7581.config + release.config 作基线，.config-ponwrt-full 叠加
 # DIY:  diy-1 改 feeds / diy-2 内核+插件 / diy-3 argon
-# files/: etc/config、etc/shadow、etc/fwxd/feature.bin、OAF 应用图标
+# files/: etc/config、etc/shadow、etc/fwxd/feature.bin、OAF 应用图标、
+#         oaf_status 前端（Lua 控制器 / htm 模板 / 静态资源）与 oaf_ctstat 采集器
 #
 # 要点:
 #   - fw4 flowtable + PPE 硬件加速，默认 flow_offloading=1
 #   - 每流字节统计 CONFIG_NET_AIROHA_FLOW_STATS=y；PPE TCP_FIN 老化 1s -> 30s
 #   - PON 驱动栈 / 2.5G PHY 全部 =y
-#   - 插件 luci-app-pon + luci-app-oaf(官方) + luci-app-airoha-npu + argon v3.1.1
+#   - 插件 luci-app-pon + luci-app-airoha-npu + argon v3.1.1
 #   - IPTV、mosdns 不编入；dummy 接口去除
-#   - OAF 用官方 destan19/OpenAppFilter 原样编译（内核 + oafd + 官方界面）
+#   - OAF 后端用官方 destan19/OpenAppFilter（oaf.ko + appfilter/oafd），
+#     界面换成 files/ 里的 oaf_status（用户列表 + 终端详情 + 采集器），
+#     官方 luci-app-oaf 界面不编入
 #   - 工具链缓存: actions/cache + Release(toolchain-cache)
 #
 
@@ -167,8 +170,22 @@ jobs:
       run: |
         mkdir -p openwrt/files
         if [ -d files ]; then cp -a files/. openwrt/files/ && echo "files/ 已合并进 openwrt/files ($(find openwrt/files -type f | wc -l) 个文件)"; fi
-        # Windows 上 core.fileMode=false，脚本可能没有执行位；当前 files/ 无可执行文件，做兜底
-        chmod 755 openwrt/files/etc/init.d/* openwrt/files/etc/uci-defaults/* 2>/dev/null || true
+        # 二进制资源（LuCI 的 .lmo 翻译表）没法当文本入库，用 base64 文本中转：
+        # 合并后立刻还原成真正的 .lmo，再把中转目录删掉，固件里不留 .b64
+        b64dir=openwrt/files/usr/share/oaf_status/i18n-base64
+        if [ -d "$b64dir" ]; then
+          mkdir -p openwrt/files/usr/lib/lua/luci/i18n
+          for f in "$b64dir"/*.b64; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f" .b64)
+            base64 -d "$f" > "openwrt/files/usr/lib/lua/luci/i18n/$name"
+            echo "   还原 i18n: $name ($(wc -c < "openwrt/files/usr/lib/lua/luci/i18n/$name") 字节)"
+          done
+          rm -rf "$b64dir"
+        fi
+        # Windows 上 core.fileMode=false，脚本可能没有执行位，统一兜底
+        chmod 755 openwrt/files/etc/init.d/* openwrt/files/etc/uci-defaults/* \
+                  openwrt/files/www/cgi-bin/* 2>/dev/null || true
         cd openwrt
         # 1) 官方基线: ponwrt 自带 configs/an7581.config + configs/release.config
         #    （含 UBIFS / initramfs / squashfs / 内核参数等镜像级设置，手写种子缺失会编出不能启动的镜像）
@@ -255,17 +272,20 @@ jobs:
         need CONFIG_PACKAGE_luci-theme-argon
         need CONFIG_PACKAGE_luci-app-airoha-npu
         need CONFIG_PACKAGE_luci-app-pon
-        echo "----- OAF: 官方三件套 -----"
+        echo "----- OAF: 后端保留（kmod-oaf + appfilter），界面换成 files/ 的 oaf_status -----"
         need CONFIG_PACKAGE_kmod-oaf
         need CONFIG_PACKAGE_appfilter
-        need CONFIG_PACKAGE_luci-app-oaf
+        # 官方 Lua 界面不再编入（上面的 absent 已覆盖）
         need CONFIG_PACKAGE_libuci-lua
-        # luci-app-oaf 是 Lua 插件，PonWrt 默认纯 ucode LuCI，需要兼容层才能加载
+        # oaf_status 是 Lua 控制器 + htm 模板，PonWrt 默认纯 ucode LuCI，需要兼容层才能加载
         need CONFIG_PACKAGE_luci-compat
         need CONFIG_PACKAGE_ucode-mod-lua
         need CONFIG_PACKAGE_luci-lib-jsonc
         need CONFIG_PACKAGE_luci-lib-nixio
-        for d in package/OpenAppFilter/oaf package/OpenAppFilter/open-app-filter package/OpenAppFilter/luci-app-oaf; do
+        # 采集器：lua 解释器 + conntrack 事件流
+        need CONFIG_PACKAGE_lua
+        need CONFIG_PACKAGE_conntrack
+        for d in package/OpenAppFilter/oaf package/OpenAppFilter/open-app-filter; do
           if [ -f "$d/Makefile" ]; then echo "✅ $d"; else echo "❌ 缺少 $d"; ok=0; fi
         done
         echo "----- UPnP -----"
@@ -281,11 +301,26 @@ jobs:
                    CONFIG_PACKAGE_mosdns CONFIG_PACKAGE_luci-app-mosdns \
                    CONFIG_PACKAGE_geo2txt CONFIG_PACKAGE_v2ray-geoip \
                    CONFIG_PACKAGE_v2ray-geosite \
-                   CONFIG_PACKAGE_kmod-mt76-core CONFIG_PACKAGE_kmod-mt76-connac \
-                   CONFIG_PACKAGE_kmod-mac80211 CONFIG_PACKAGE_kmod-cfg80211 \
-                   CONFIG_PACKAGE_wifi-scripts CONFIG_PACKAGE_wpad-openssl \
-                   CONFIG_PACKAGE_hostapd-common CONFIG_PACKAGE_wireless-regdb; do
+                   CONFIG_PACKAGE_kmod-dummy \
+                   CONFIG_PACKAGE_luci-app-oaf; do
           absent "$sym"
+        done
+        # 无线栈：本机没有射频，希望不编入；但 wpad 是 kconfig 的 choice，
+        # make defconfig 一定会挑一个成员（wpad-basic-*），而该成员依赖
+        # hostapd-common，wireless-regdb 也可能跟着回来。这属于"没关干净"，
+        # 不影响光猫功能，所以只提示、不判失败。
+        # 反面教材：8dd412e 把这几项塞进上面的硬校验，CI 直接卡死两次。
+        echo "----- 无线栈（软校验：被 choice 带回只提示，不判失败）-----"
+        for sym in CONFIG_PACKAGE_kmod-mt76-core CONFIG_PACKAGE_kmod-mt76-connac \
+                   CONFIG_PACKAGE_kmod-mac80211 CONFIG_PACKAGE_kmod-cfg80211 \
+                   CONFIG_PACKAGE_wifi-scripts CONFIG_WIFI_SCRIPTS_UCODE \
+                   CONFIG_PACKAGE_wpad-openssl CONFIG_PACKAGE_hostapd-common \
+                   CONFIG_PACKAGE_wireless-regdb; do
+          if grep -qE "^$sym=[ym]$" .config; then
+            echo "⚠️  $sym 仍被选中（choice 依赖带回，不判失败）"
+          else
+            echo "✅ $sym 未编入"
+          fi
         done
         echo "----- feeds: pon_userspace 必须是上游 pbs05 -----"
         if grep -q 'naoki66/OpenWrt_ONU_CONFIG' feeds.conf.default; then
@@ -322,22 +357,43 @@ jobs:
         else
           echo "❌ files/etc/config/pon 里 omcc_version 不是 0x86"; ok=0
         fi
-        echo "----- files/ 里不应再有任何自研 OAF 产物（界面改用官方 luci-app-oaf）-----"
-        leftover=$(find files -type f \( -name 'oaf-flowd' -o -name 'oaf_traffic.lua' \
-                    -o -name 'oaf_app_names.lua' -o -name 'oaf_status_users.lua' \
-                    -o -path '*oaf_status*' -o -path '*rpcd/ucode/luci' \
-                    -o -path '*view/status/include/10_system.js' \) 2>/dev/null | head -5)
-        if [ -n "$leftover" ]; then
-          echo "❌ files/ 里仍有自研 OAF / CPU 采样器残留:"; echo "$leftover" | sed 's/^/   /'; ok=0
-        else
-          echo "✅ files/ 无 oaf_status / oaf-flowd / oaf_traffic / 10_system.js 残留"
+        echo "----- files/ 里的 OAF 前端（oaf_status：用户列表 + 终端详情）-----"
+        for f in usr/lib/lua/luci/controller/oaf_status_users.lua \
+                 usr/lib/lua/luci/model/cbi/oaf_status/user_list.lua \
+                 usr/lib/lua/luci/model/cbi/oaf_status/user_detail.lua \
+                 usr/lib/lua/luci/view/oaf_status/user_list.htm \
+                 usr/lib/lua/luci/view/oaf_status/user_detail.htm \
+                 usr/lib/lua/luci/oaf_traffic.lua \
+                 usr/lib/lua/luci/oaf_app_names.lua \
+                 usr/lib/lua/luci/i18n/oaf_status.zh-cn.lmo \
+                 usr/lib/lua/oaf_ctstat.lua \
+                 etc/init.d/oaf-ctstat \
+                 usr/share/oaf_status/vendors.json \
+                 www/cgi-bin/oaf-live \
+                 www/luci-static/resources/oaf_status/echarts.min.js \
+                 www/luci-static/resources/oaf_status/jquery-3.7.1.min.js \
+                 www/luci-static/resources/oaf_status/oaf_icon.js \
+                 www/luci-static/resources/oui/oui.js \
+                 www/luci-static/resources/oui/vendors-d337209f8c00.json; do
+          if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
+        done
+        if [ -x files/www/cgi-bin/oaf-live ]; then echo "✅ oaf-live 可执行"; else echo "❌ files/www/cgi-bin/oaf-live 没有执行位"; ok=0; fi
+        # 旧的官方界面若被装回，会和 oaf_status 抢同一批资源，明确报出来
+        if [ -d package/OpenAppFilter/luci-app-oaf ]; then
+          echo "⚠️  package/OpenAppFilter/luci-app-oaf 仍存在（未编入，忽略）"
         fi
-        # OAF 官方界面的应用图标（562 个；路径与 luci-app-oaf 的 resources/oaf 一致）
+        # 应用图标（562 个，oaf_status 复用这个目录）
         icons=$(ls files/www/luci-static/resources/oaf/app_icons/*.png 2>/dev/null | wc -l)
         if [ "$icons" -ge 500 ]; then
           echo "✅ OAF 应用图标 $icons 个"
         else
           echo "❌ OAF 应用图标缺失 (icons=$icons)"; ok=0
+        fi
+        vendor_svg=$(ls files/www/luci-static/resources/oui/*.svg 2>/dev/null | wc -l)
+        if [ "$vendor_svg" -ge 30 ]; then
+          echo "✅ OUI 厂商图标 $vendor_svg 个"
+        else
+          echo "❌ OUI 厂商图标缺失 (svg=$vendor_svg)"; ok=0
         fi
         echo "----- dummy 接口已排除 -----"
         if grep -qE '^CONFIG_PACKAGE_kmod-dummy=[ym]' .config; then
@@ -681,7 +737,8 @@ jobs:
           echo "| 每流统计 | CONFIG_NET_AIROHA_FLOW_STATS=y |"
           echo "| PON | airoha-xpon + pon-frontend + en7572 |"
           echo "| 2.5G | phy-airoha-en8811h (lan1) |"
-          echo "| 插件 | luci-app-pon / luci-app-oaf / luci-app-airoha-npu / argon v3.1.1 |"
+          echo "| 插件 | luci-app-pon / luci-app-airoha-npu / argon v3.1.1 |"
+          echo "| OAF | 后端 oaf.ko + appfilter/oafd；界面 oaf_status（自研前端 + conntrack 采集器） |"
           echo "| 时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
         } > release.txt
 

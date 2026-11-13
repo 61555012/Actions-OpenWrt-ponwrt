@@ -30,19 +30,23 @@ CONFIG_PACKAGE_luci-theme-argon=y
 CONFIG_PACKAGE_luci-app-pon=y
 CONFIG_PACKAGE_luci-app-airoha-npu=y
 
-# Lua 兼容层：luci-app-oaf 是 Lua 插件，PonWrt 默认纯 ucode LuCI
+# Lua 兼容层：oaf_status 是 Lua 控制器 + htm 模板，PonWrt 默认纯 ucode LuCI
 CONFIG_PACKAGE_luci-compat=y
 CONFIG_PACKAGE_luci-lib-jsonc=y
 CONFIG_PACKAGE_luci-lib-nixio=y
 CONFIG_PACKAGE_ucode-mod-lua=y
+CONFIG_PACKAGE_libuci-lua=y
 
-# OAF 官方三件套（内核 + 守护 + 界面）
+# OAF 后端（内核特征库 + oafd/appfilter）；官方 Lua 界面不编入，
+# 界面用 files/ 里的 oaf_status（见 diy-part2 里删掉 luci-app-oaf）
 CONFIG_PACKAGE_kmod-oaf=y
 CONFIG_PACKAGE_appfilter=y
-CONFIG_PACKAGE_luci-app-oaf=y
-CONFIG_PACKAGE_libuci-lua=y
 CONFIG_PACKAGE_libsqlite3=y
 CONFIG_PACKAGE_libcurl=y
+
+# oaf_status 的采集器：lua 解释器 + conntrack 事件流
+CONFIG_PACKAGE_lua=y
+CONFIG_PACKAGE_conntrack=y
 
 # UPnP（fw4 是 nftables，只能用 nftables 变体）
 CONFIG_PACKAGE_luci-app-upnp=y
@@ -50,6 +54,7 @@ CONFIG_PACKAGE_miniupnpd-nftables=y
 # CONFIG_PACKAGE_miniupnpd-iptables is not set
 
 # 不编入
+# CONFIG_PACKAGE_luci-app-oaf is not set
 # CONFIG_PACKAGE_luci-app-iptv is not set
 # CONFIG_PACKAGE_luci-app-appfilter is not set
 # CONFIG_PACKAGE_mosdns is not set
