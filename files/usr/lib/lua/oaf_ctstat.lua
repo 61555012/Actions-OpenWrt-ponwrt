@@ -115,8 +115,16 @@ local function atomic(path, body)
 	return true
 end
 
+-- Lua 5.1 的 %d 走 lua_number2integer（这台机器是 double/int32 构建），
+-- 一旦值超过 2^31（今日字节 2 GB 就到）就抛 "integer expected"，
+-- 整个采样进程连崩 6 次后被 procd 放弃，页面就开始吃陈旧值。
+-- %.0f 对任意 double 都安全，且不会输出指数形式。
 local function num(v)
-	return string.format("%d", math.floor(v or 0))
+	v = tonumber(v) or 0
+	if v ~= v or v == math.huge or v == -math.huge then
+		v = 0
+	end
+	return string.format("%.0f", math.floor(v))
 end
 
 local function jstr(s)
@@ -198,6 +206,7 @@ local total_up, total_down = 0, 0
 local rate_up, rate_down = 0, 0
 local today = ldate("%Y-%m-%d")
 local ev_offset = 0
+local boot_ts = 0
 local mac_at, ev_check_at, last_summary = 0, 0, 0
 -- 分段计时开关：/tmp/oaf-flow/prof 存在才生效，平时每条分支都不进。
 local prof = false
@@ -446,16 +455,19 @@ local function settle_round(now, dt)
 	end
 end
 
--- Time-budgeted sliding average. A raw 1 s window is unusable (PPE writes
--- counters back every ~3.10 s, so 56.5% of 1 s samples are zero, CV 1.16).
--- Keep the newest samples covering at least 4 s: at 1 s sampling that is ~5
--- samples, error < 1%, and the number still changes every second.
+-- PPE 每 ~3.1 秒才把硬件计数回写进 conntrack，所以 1 秒一个样本时
+-- 一半以上是 0，随后的那一枪是 3 秒的量。窗口如果只有 4 秒，一轮里
+-- 装得下 1 次回写（多一次就超），显示的速率就会在 0.6x～1.6x 之间跳——
+-- 实测 100 MB/s 的下载会闪出 160 MB/s。
+-- 窗口取 RATE_SEC 秒（至少覆盖 3 次回写），误差压到 ±15% 以内；
+-- 采样一轮本身约 1.6 秒，所以窗口里是 7 个左右的样本。
+local RATE_SEC = 10
 local function rate(hist, du, dd, du6, dd6, dt)
 	hist[#hist + 1] = { u = du, d = dd, u6 = du6, d6 = dd6, dt = dt }
 	while #hist > 1 do
 		local older = 0
 		for i = 2, #hist do older = older + hist[i].dt end
-		if older >= 4 then table.remove(hist, 1) else break end
+		if older >= RATE_SEC then table.remove(hist, 1) else break end
 	end
 	local su, sd, su6, sd6, st = 0, 0, 0, 0, 0
 	for _, x in ipairs(hist) do
@@ -699,7 +711,11 @@ local function process_events(now, tick)
 	local n = 0
 	for line in f:lines() do
 		local ts = tonumber(line:match("^%[(%d+%.?%d*)%]") or "") or now
-		if line:find("%[DESTROY%]") then
+		-- 重启瞬间，旧 feed 缓冲区里还没写完的事件会带着启动前的时间戳
+		-- 落进新文件；那批字节在启动前就已经跑过（基线无从重建），
+		-- 整条计入会让今日总量凭空多出几百 MB、速率窗口打出尖峰。
+		if ts < boot_ts then ts = nil end
+		if ts and line:find("%[DESTROY%]") then
 			local rec = parse_line(line)
 			if rec then
 				local st, r = flows[rec.key], retired[rec.key]
@@ -823,6 +839,7 @@ local function main()
 		prof = true
 		os.remove(DIR .. "/prof")            -- one-shot: next restart is silent
 	end
+	boot_ts = os.time()
 	feed_reset()
 	refresh_macs()
 	mac_at = os.time()
