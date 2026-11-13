@@ -88,22 +88,92 @@ end
 -- 才调用它，声明提前只是为了拿到这个 upvalue。
 local override_usage_times = nil
 
+-- ---------------------------------------------------------------- 列表排序
+-- 用户列表统一排序口径：活跃优先、大流量优先。
+--   1) 在线、且今日真用过网（有流量/活跃时长/active 标记）的排最前
+--   2) 在线但今日没流量的居中，离线设备沉底
+--   3) 同档内按今日总流量从大到小
+--   4) 再看今日活跃时长、实时速率，最后按 MAC 稳定兜底
+-- 活跃判定刻意用「累计」指标而不是瞬时速率：速率每 3 秒就变，拿它分层
+-- 会让设备随轮询在两页之间反复横跳，翻页时看着像漏了设备。
+-- 另外 today_*_bytes / up_rate / down_rate 本身就是 v4+v6 的合计
+-- （前端算 v4 时是用合计减去 today_*6_bytes / *_rate6），不能再把 v6
+-- 加一遍，否则有 IPv6 的设备会被算成双倍流量、凭空排到前面。
+local function num(v)
+	return tonumber(v) or 0
+end
+
+local function user_total_bytes(u)
+	return num(u.today_up_bytes) + num(u.today_down_bytes)
+end
+
+local function user_total_rate(u)
+	return num(u.up_rate) + num(u.down_rate)
+end
+
+local function user_active_level(u)
+	if num(u.online) ~= 1 then return 0 end
+	if user_total_bytes(u) > 0 or num(u.today_active_time) > 0 or num(u.active) == 1 then
+		return 2
+	end
+	return 1
+end
+
+local function sort_users_by_activity(list)
+	table.sort(list, function(a, b)
+		local la, lb = user_active_level(a), user_active_level(b)
+		if la ~= lb then return la > lb end
+		local ba, bb = user_total_bytes(a), user_total_bytes(b)
+		if ba ~= bb then return ba > bb end
+		local ta, tb = num(a.today_active_time), num(b.today_active_time)
+		if ta ~= tb then return ta > tb end
+		local ra, rb = user_total_rate(a), user_total_rate(b)
+		if ra ~= rb then return ra > rb end
+		return tostring(a.mac or "") < tostring(b.mac or "")
+	end)
+	return list
+end
+
 function api_get_all_users()
 	local page      = tonumber(luci.http.formvalue("page")) or 1
 	local page_size = tonumber(luci.http.formvalue("page_size")) or 20
 	local flag      = tonumber(luci.http.formvalue("flag")) or 3
 
-	local resp = fwx("get_all_users", { flag = flag, page = page, page_size = page_size })
+	-- 排序必须跨页生效，所以先一次取回全部设备，排完再按请求的页切片。
+	-- oafd 的 get_all_users 上限 1024 台，家用/宿舍场景足够；取全量失败时
+	-- 退回原来的单页请求，保证列表不会开天窗。
+	local ALL_USERS_LIMIT = 1024
+	local resp = fwx("get_all_users", { flag = flag, page = 1, page_size = ALL_USERS_LIMIT })
+	if not (resp and resp.code == 2000 and type(resp.data) == "table") then
+		resp = fwx("get_all_users", { flag = flag, page = page, page_size = page_size })
+	end
 
 	if resp and resp.code == 2000 and type(resp.data) == "table" then
-		if traffic and type(resp.data.list) == "table" then
-			pcall(traffic.merge_list, resp.data.list)
+		local list = type(resp.data.list) == "table" and resp.data.list or {}
+		if traffic and #list > 0 then
+			pcall(traffic.merge_list, list)
 		end
 		-- 上网时长统一为会话并集口径，与详情页/饼图/访问记录一致
-		if override_usage_times and type(resp.data.list) == "table" then
-			pcall(override_usage_times, resp.data.list)
+		if override_usage_times and #list > 0 then
+			pcall(override_usage_times, list)
 		end
-		json_out({ data = resp.data })
+		sort_users_by_activity(list)
+
+		local total = num(resp.data.total_num)
+		if total < #list then total = #list end
+		local total_page = math.max(1, math.ceil(total / page_size))
+		local out = {}
+		for i = 1, page_size do
+			local row = list[(page - 1) * page_size + i]
+			if row then out[#out + 1] = row end
+		end
+		json_out({ data = {
+			list       = out,
+			total_num  = total,
+			total_page = total_page,
+			page       = page,
+			page_size  = page_size,
+		} })
 	else
 		-- fwx/oafd 不可用（appfilter 包未装、oafd 未启动或 ubus 超时）的兜底：
 		-- 直接用 oaf-flowd 的设备表出列表。流量/速率/在线状态/上网时长/OUI
@@ -129,12 +199,7 @@ function api_get_all_users()
 		if total > 0 then
 			if traffic then pcall(traffic.merge_list, list) end
 			if override_usage_times then pcall(override_usage_times, list) end
-			table.sort(list, function(a, b)
-				local da = (a.today_down_bytes or 0) + (a.today_up_bytes or 0)
-				local db = (b.today_down_bytes or 0) + (b.today_up_bytes or 0)
-				if da == db then return (a.ip or "") < (b.ip or "") end
-				return da > db
-			end)
+			sort_users_by_activity(list)
 		end
 		local total_page = math.max(1, math.ceil(total / page_size))
 		local out = {}
