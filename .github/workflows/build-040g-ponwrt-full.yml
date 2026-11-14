@@ -369,7 +369,7 @@ jobs:
                  usr/lib/lua/oaf_ctstat.lua \
                  etc/init.d/oaf-ctstat \
                  usr/share/oaf_status/vendors.json \
-                 www/cgi-bin/oaf-live \
+                 www/cgi-bin/oaf_live \
                  www/luci-static/resources/oaf_status/echarts.min.js \
                  www/luci-static/resources/oaf_status/jquery-3.7.1.min.js \
                  www/luci-static/resources/oaf_status/oaf_icon.js \
@@ -377,7 +377,7 @@ jobs:
                  www/luci-static/resources/oui/vendors-d337209f8c00.json; do
           if [ -f "files/$f" ]; then echo "✅ files/$f"; else echo "❌ 缺少 files/$f"; ok=0; fi
         done
-        if [ -x files/www/cgi-bin/oaf-live ]; then echo "✅ oaf-live 可执行"; else echo "❌ files/www/cgi-bin/oaf-live 没有执行位"; ok=0; fi
+        if [ -x files/www/cgi-bin/oaf_live ]; then echo "✅ oaf_live 可执行"; else echo "❌ files/www/cgi-bin/oaf_live 没有执行位"; ok=0; fi
         # 旧的官方界面若被装回，会和 oaf_status 抢同一批资源，明确报出来
         if [ -d package/OpenAppFilter/luci-app-oaf ]; then
           echo "⚠️  package/OpenAppFilter/luci-app-oaf 仍存在（未编入，忽略）"
