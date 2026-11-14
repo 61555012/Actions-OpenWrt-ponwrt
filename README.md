@@ -17,7 +17,7 @@ files/                                         # 原样合并进固件根目录
   etc/shadow                                   # root 密码
   etc/fwxd/feature.bin                         # OAF 应用特征库
   etc/apk/{config,repositories}                # 关签名校验 + PKU 软件源 6 条
-  www/luci-static/resources/oaf/app_icons/     # 562 个应用图标（oaf_status 复用）
+  www/luci-static/resources/oaf/app_icons/     # OAF 官方路径：562 个应用图标（oaf_status 前端复用）
   usr/lib/lua/luci/controller/oaf_status_users.lua   # oaf_status 控制器（状态 → 用户列表）
   usr/lib/lua/luci/view/oaf_status/*.htm             # 用户列表 / 终端详情两页
   usr/lib/lua/luci/oaf_traffic.lua                   # 硬件加速安全的流量口径

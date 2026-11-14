@@ -1,6 +1,6 @@
-/* oaf_icon.js: 应用图标路径的唯一入口，实际目录由 appIconSrc() 决定。
-   两套固件的图标目录名不同（oaf/app_icons 或 oaf_status/app_icons），
-   模板里请勿再写死路径，一律调用 window.OAFIcon.appIconSrc()。 */
+/* oaf_icon.js: 应用图标路径的唯一入口，统一使用 OAF 官方目录
+   /luci-static/resources/oaf/app_icons/。模板请勿再写死路径，
+   一律调用 window.OAFIcon.appIconSrc()。 */
 
 
 (function(window,$){'use strict';var iconColors=['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#ec4899','#84cc16','#6366f1'];var iconStatusCache={};function hashColor(value){var text=value?String(value):'';var hash=0;if(!text){return iconColors[0];}

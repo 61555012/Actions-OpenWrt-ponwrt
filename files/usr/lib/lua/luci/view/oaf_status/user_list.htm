@@ -6,8 +6,8 @@
 <script type="text/javascript" src="<%=resource%>/oaf_status/echarts.min.js?v=5.0"></script>
 
 <script type="text/javascript">
-// 应用图标目录由 oaf_icon.js 统一决定（两套固件目录名不同），
-// 这里不再写死路径，避免跨设备复制模板后图标 404。
+// 应用图标统一走 OAF 官方目录 /luci-static/resources/oaf/app_icons/，
+// 由 oaf_icon.js 的 appIconSrc() 提供唯一入口，模板不再各自拼路径。
 function oafAppIconSrc(id) {
 	if (window.OAFIcon && window.OAFIcon.appIconSrc)
 		return window.OAFIcon.appIconSrc('<%=resource%>', id);
