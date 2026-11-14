@@ -1,0 +1,97 @@
+#!/usr/bin/lua
+-- 列表页 1 秒快通道专用接口（精简 CGI）。
+--
+-- 为什么不用 LuCI 的 controller：一次 LuCI 请求固定要 ~65 ms——派发器要
+-- 解析菜单索引缓存、加载会话插件、再 require 一整套 luci.* 模块，而
+-- /api/live_rates 本身只读 /tmp/oaf-flow/stats.json、输出几百字节。实测
+-- 同一个数据走 LuCI 是 70 ms，走这里 8 ms，页面开着时每秒一次，差出来的
+-- 就是这一整块 CPU。
+--
+-- 鉴权不省：Cookie 里的 LuCI 会话 id 交给 ubus session get 校验，校验不过
+-- 直接 403，前端会自动回退到原来的 /api/live_rates。
+--
+-- 输出字段与 api_live_rates 完全一致，前端两条路可以无缝互换。
+
+local function out(status, body)
+	io.write("Status: ", status, "\r\n")
+	io.write("Content-Type: application/json\r\n")
+	io.write("Cache-Control: no-store\r\n")
+	io.write("\r\n")
+	io.write(body or "")
+	io.write("\n")
+	os.exit(0)
+end
+
+-- 会话校验 ---------------------------------------------------------------
+-- uhttpd 不给 CGI 透传 Cookie 和自定义请求头（只白名单几个），所以会话 id
+-- 由页面渲染时从服务端取出，随 POST body 一起送过来：body 不进浏览器历史、
+-- 不进 Referer，比塞在 URL 里干净。
+local function urlarg(s, k)
+	-- 查询串里第一个参数前面只有 "?"，body 里第一个参数前面什么都没有，
+	-- 所以两个模式都要认
+	local v = s:match("[?&]" .. k .. "=([^&]*)") or s:match("^" .. k .. "=([^&]*)")
+	return v or ""
+end
+
+local body = ""
+if (os.getenv("CONTENT_LENGTH") or "") ~= "" then
+	body = io.stdin:read("*a") or ""
+	if #body > 8192 then body = body:sub(1, 8192) end
+end
+local q = os.getenv("QUERY_STRING") or ""
+local sid = urlarg(body, "sid")
+if sid == "" then sid = urlarg(q, "sid") end
+-- 只接受纯十六进制：这个值要拼进 popen 的命令行，任何引号/空格都必须挡掉
+if sid == "" or #sid < 16 or not sid:match("^%x+$") then
+	out("403 Forbidden", '{"list":[]}')
+end
+local p = io.popen("ubus call session get '{\"ubus_rpc_session\":\"" .. sid .. "\"}' 2>/dev/null")
+local sj = p and p:read("*a") or ""
+if p then p:close() end
+if not sj:find('"username"', 1, true) then
+	out("403 Forbidden", '{"list":[]}')
+end
+
+-- 数据 -------------------------------------------------------------------
+local ok, tr = pcall(require, "luci.oaf_traffic")
+if not ok then out("200 OK", '{"list":[]}') end
+local ok2, idx = pcall(tr.index)
+if not ok2 or type(idx) ~= "table" then out("200 OK", '{"list":[]}') end
+
+-- 前端只把在屏的 MAC 拼成 macs= 传上来；不传则全量
+local want
+local raw = urlarg(body, "macs")
+if raw == "" then raw = urlarg(q, "macs") end
+if raw ~= "" then
+	want = {}
+	for m in raw:gmatch("[^,]+") do
+		m = m:gsub("%%3[Aa]", ":"):gsub("%%3[aA]", ":"):upper()
+		want[m] = true
+	end
+end
+
+local macs = {}
+for mac in pairs(idx) do
+	if not want or want[mac] then macs[#macs + 1] = mac end
+end
+table.sort(macs)
+
+local f = { '{"list":[' }
+for i, mac in ipairs(macs) do
+	local c = idx[mac]
+	if c then
+		f[#f + 1] = string.format(
+			'%s{"mac":"%s","ip6":"%s","up_rate":%.0f,"down_rate":%.0f,' ..
+			'"up_rate6":%.0f,"down_rate6":%.0f,"today_up_bytes":%.0f,' ..
+			'"today_down_bytes":%.0f,"today_up6_bytes":%.0f,' ..
+			'"today_down6_bytes":%.0f,"today_active_time":%.0f,"flows":%.0f}',
+			(i > 1) and "," or "", mac, (c.ip6 or ""):gsub('[\\"]', ""),
+			c.rate_up or 0, c.rate_down or 0,
+			c.rate_up6 or 0, c.rate_down6 or 0,
+			c.today_up or 0, c.today_down or 0,
+			c.today_up6 or 0, c.today_down6 or 0,
+			c.day_active or 0, c.flows or 0)
+	end
+end
+f[#f + 1] = "]}"
+out("200 OK", table.concat(f))

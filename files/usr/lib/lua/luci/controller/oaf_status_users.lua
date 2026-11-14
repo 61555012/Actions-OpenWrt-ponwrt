@@ -17,19 +17,10 @@ if not ok_tr then traffic = nil end
 
 local SECONDS_PER_DAY = 86400
 
--- 应用名兜底：id=0 表示采样器一个窗口都没拿到 mark；id>0 但特征库里没有
--- 名字，表示有编号但没登记。两种情况对用户是同一件事——认不出这是什么应用，
--- 所以只保留一个名字「未识别」，绝不把内部编号（App12 / #10）抛到界面上。
+-- 认不出的应用统一叫「未识别」：id=0 表示采样器一个窗口都没拿到 mark，
+-- id>0 但内置名表里没登记，对用户是同一件事，不把 App12 这类内部编号
+-- 抛到界面上。
 local UNKNOWN_NAME = "未识别"
-
--- The router itself runs UTC (zonename=UTC / TZ=GMT0). All OAF statistics are
--- presented in Beijing time (UTC+8), which is what the browser and the user
--- actually see; os.date("!") is UTC, so adding the offset keeps this correct
--- even if the system timezone is ever changed later.
-local TZ_OFFSET = 8 * 3600
-local function ldate(fmt, ts)
-	return os.date("!" .. fmt, (ts or os.time()) + TZ_OFFSET)
-end
 
 -- OAF 的客户端统计目录：fwx(oafd) 的 base_data_path 就指向 tmpfs 上的
 -- /tmp/oaf（旧版本叫 /tmp/fwx），这里只认这两处，没有外挂分区路径。
@@ -50,6 +41,8 @@ function index()
 
 	entry({"admin", "status", "oaf_users", "api", "get_all_users"},        call("api_get_all_users"),        nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "live_rates"},           call("api_live_rates"),           nil).leaf = true
+	entry({"admin", "status", "oaf_users", "api", "get_system_base_info"},  call("api_get_system_base_info"),  nil).leaf = true
+	entry({"admin", "status", "oaf_users", "api", "get_class_list"},        call("api_get_class_list"),        nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "get_user_basic_info"},   call("api_get_user_basic_info"),   nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "dev_visit_time"},        call("api_dev_visit_time"),        nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "dev_visit_list"},        call("api_dev_visit_list"),        nil).leaf = true
@@ -192,6 +185,14 @@ function api_get_all_users()
 							hostname = c.name or "",
 							online   = ((c.flows or 0) > 0) and 1 or 0,
 						}
+						-- 信号列：无线客户端补 libiwinfo 的 RSSI，有线设备
+						-- 留空显示 --（信号列开关来自 system_base_info）
+						if traffic then
+							local ok, w = pcall(traffic.wireless_user, mac)
+							if ok and w and w.rssi then
+								list[total].rssi = w.rssi
+							end
+						end
 					end
 				end
 			end
@@ -249,8 +250,6 @@ function api_live_rates()
 				today_up6_bytes   = c.today_up6 or 0,
 				today_down6_bytes = c.today_down6 or 0,
 				today_active_time = c.day_active or 0,
-				today_online_time = c.day_online or 0,
-				-- 连接数是 v4 + v6 的合计，明细不再单独回传
 				flows             = c.flows or 0,
 			}
 		end
@@ -259,12 +258,44 @@ function api_live_rates()
 	json_out({ list = out })
 end
 
+-- 列表里「会话数 / 信号」两列是否显示，取决于这两个开关。
+-- 原版还返回一堆别的字段，这里只留用得上的。
+function api_get_system_base_info()
+	local resp = fwx("get_system_base_info", {})
+	local data = (resp and resp.code == 2000 and type(resp.data) == "table") and resp.data or {}
+
+	local support = data.wireless_support
+	-- fwx 不在（appfilter 未装、oafd 挂了）时自行探测无线能力：前端靠
+	-- wireless_support 这个键决定画不画信号列，缺了它整列就消失。
+	if support == nil and traffic then
+		local ok, sup = pcall(traffic.wireless_support)
+		if ok then
+			support = sup
+		end
+	end
+
+	json_out({
+		user_session_enable = data.user_session_enable or 0,
+		wireless_support    = support
+	})
+end
+
+function api_get_class_list()
+	local resp = fwx("class_list", {})
+	if resp and resp.code == 2000 and type(resp.data) == "table" then
+		json_out(resp.data)
+	else
+		json_out({ class_list = {} })
+	end
+end
+
 -- ---------------------------------------------------------------- 终端详情
 
--- 名字只能从 fwx 拿到（它的库里只存 appid，名字是它跟云端问的），学到一次
--- 就缓存。全部数据统一放 tmpfs，重启清零，不写 flash；固件内置 559 条名表
--- 打底，重启后 fwx 会重新教一遍。
+-- 名字只能从 fwx 拿到（它的库里只存 appid，名字是它跟云端问的），所以学到
+-- 一次就落盘。写在 overlay 的 /etc/oaf/data 上是为了跨重启累积：某个 app
+-- 今天出现过一次，以后半年前的记录也能显示中文名。
 local APP_NAME_FILES = {
+	"/etc/oaf/data/app_names.json",
 	"/tmp/oaf-flow/app_names.json",
 }
 
@@ -326,11 +357,17 @@ end
 -- 访问记录只保留最近 30 天。
 --
 -- fwx 的 dev_visit_list 只认「今天」：date 参数被忽略，total_num 就是当天
--- 的条数，而它的库 /tmp/oaf/client.db 在 tmpfs 上，重启就没了。30 天记录
--- 的持久化文件也改到 tmpfs，重启清零，与流量统计同口径。
+-- 的条数，而它的库 /tmp/oaf/client.db 在 tmpfs 上，重启就没了。所以 30 天
+-- 的记录由 oaf-flowd 直接读 client.db 的 app_visit_record 表，滚动写到
+-- /etc/oaf/data/visits.json。这里读那份文件，再用 fwx 的当天
+-- 列表补齐：它带应用名（文件里只有 appid），也能把 flowd 还没同步到的
+-- 最后十几秒补上。
 local VISIT_KEEP_SECONDS = 30 * SECONDS_PER_DAY
+-- 只认 flowd 自己的 /etc/oaf/data/visits.json，不做任何跨固件的历史兜底：
+-- 备份分区刷机不擦，读旧文件会把上一任安装的 30 天记录原样带回来
+-- （用户以为刷机从 0 开始，列表里却全是旧机器的历史）。
 local VISIT_STORE_FILES = {
-	"/tmp/oaf-flow/visits.json",
+	"/etc/oaf/data/visits.json",
 }
 
 local function load_visit_store()
@@ -339,88 +376,6 @@ local function load_visit_store()
 		if data and type(data.list) == "table" then return data.list end
 	end
 	return nil
-end
-
--- 把读到的会话合并进这份 30 天存储。
---
--- 之前只有读没有写：visits.json 永远是空的，"仅显示最近 30 天"实际只有
--- fwx 当天那一份，重启后连当天都没了。现在每次请求顺带把当天读到的会话
--- 并进去，按 (mac, id, ft) 去重、滚动丢掉 30 天以前、总量封顶 4000 条，
--- 写盘节流 30 秒（同一台设备刷页面时不会每次都重写整个文件）。
-local VISIT_SAVE_EVERY = 30
-local VISIT_MAX_ROWS   = 4000
-
-local function visit_store_read()
-	local data = read_json_file(VISIT_STORE_FILES[1])
-	if type(data) == "table" and type(data.list) == "table" then
-		return data.list, tonumber(data.at) or 0
-	end
-	return {}, 0
-end
-
-local function visit_store_write(list, now)
-	local rows = {}
-	for _, r in ipairs(list) do
-		rows[#rows + 1] = string.format(
-			'{"mac":"%s","id":%d,"ft":%d,"lt":%d,"tt":%d}',
-			tostring(r.mac or ""), tonumber(r.id) or 0,
-			tonumber(r.ft) or 0, tonumber(r.lt) or 0, tonumber(r.tt) or 0)
-	end
-	local path = VISIT_STORE_FILES[1]
-	local tmp  = path .. ".new"
-	local f = io.open(tmp, "w")
-	if not f then return end
-	f:write('{"at":', tostring(now), ',"list":[', table.concat(rows, ","), "]}")
-	f:close()
-	os.rename(tmp, path)
-end
-
-local function visit_store_merge(target, recs, now)
-	if type(recs) ~= "table" or #recs == 0 then return end
-	local stored, at = visit_store_read()
-	if now - at < VISIT_SAVE_EVERY then return end
-
-	local cutoff = now - VISIT_KEEP_SECONDS
-	local out, by_key = {}, {}
-	local function key(mac, id, ft)
-		return string.format("%s|%d|%d", mac, id, ft)
-	end
-	-- 先保留存储里其他设备（以及本设备更早的会话）
-	for _, r in ipairs(stored) do
-		if type(r) == "table" then
-			local mac = tostring(r.mac or ""):lower()
-			local ft  = tonumber(r.ft) or 0
-			if mac ~= "" and ft >= cutoff then
-				local k = key(mac, tonumber(r.id) or 0, ft)
-				if not by_key[k] then
-					by_key[k] = {
-						mac = mac, id = tonumber(r.id) or 0, ft = ft,
-						lt = tonumber(r.lt) or ft, tt = tonumber(r.tt) or 0,
-					}
-					out[#out + 1] = by_key[k]
-				end
-			end
-		end
-	end
-	-- 再用这次读到的会话补/并（同一次访问取更长的那个）
-	for _, r in ipairs(recs) do
-		local ft = tonumber(r.ft) or 0
-		if ft >= cutoff then
-			local k = key(target:lower(), tonumber(r.id) or 0, ft)
-			local cur = by_key[k]
-			if cur then
-				if (tonumber(r.lt) or 0) > cur.lt then cur.lt = tonumber(r.lt) end
-				if (tonumber(r.tt) or 0) > cur.tt then cur.tt = tonumber(r.tt) end
-			else
-				cur = { mac = target, id = tonumber(r.id) or 0, ft = ft,
-					lt = tonumber(r.lt) or ft, tt = tonumber(r.tt) or 0 }
-				by_key[k] = cur
-				out[#out + 1] = cur
-			end
-		end
-	end
-	while #out > VISIT_MAX_ROWS do table.remove(out, 1) end
-	visit_store_write(out, now)
 end
 
 -- 同一台设备的去重访问会话：落盘的 30 天记录 + fwx 当天列表。
@@ -505,16 +460,14 @@ local function merged_sessions(target, cutoff)
 		if (a.lt or 0) ~= (b.lt or 0) then return (a.lt or 0) > (b.lt or 0) end
 		return (a.ft or 0) > (b.ft or 0)
 	end)
-	-- 顺带把这批会话并进 30 天存储（有节流，不占多少开销量）
-	pcall(visit_store_merge, target, all, os.time())
 	return all, meta, (stored ~= nil)
 end
 
--- 北京时间今天的 0 点（epoch 秒）。直接用整数取模，不依赖设备 TZ：
--- 把 epoch 平移 +8h 后按 86400 取整，再减回偏移量。
+-- 本地时区今天的 0 点（访问记录的会话时间都按本地时间落库）
 local function today_start()
-	local shifted = os.time() + TZ_OFFSET
-	return shifted - (shifted % SECONDS_PER_DAY) - TZ_OFFSET
+	local t = os.date("*t")
+	t.hour, t.min, t.sec = 0, 0, 0
+	return os.time(t)
 end
 
 -- 设备级「上网时长」：把会话的 [开始, 结束] 区间合并去重后求和。
@@ -578,7 +531,7 @@ function api_get_user_basic_info(mac)
 		json_out(resp.data)
 	else
 		-- fwx 不在时的兜底（appfilter 未装 / oafd 挂了）：流量、速率、
-		-- 在线状态、今日上网时长来自 oaf-flowd。
+		-- 在线状态、今日上网时长来自 oaf-flowd，无线信息来自 libiwinfo，
 		-- 字段名与 fwx 的 get_user_basic_info 完全一致，前端不用分支。
 		-- 今日在线时长由 merge_user 用 flowd 的在网秒数补齐，并保证
 		-- 不小于上网时长；装回 appfilter 后会自动取 fwx 与 flowd 的较大值。
@@ -586,7 +539,19 @@ function api_get_user_basic_info(mac)
 		if traffic then
 			pcall(traffic.merge_user, d)
 			-- 与列表页同一判定：conntrack 里还有这条设备的流就是在网。
+			-- 无线客户端在下面 iwinfo 命中后也会置 1，两条路一致。
 			d.online = ((d.flows or 0) > 0) and 1 or 0
+		end
+		if traffic then
+			local ok, w = pcall(traffic.wireless_user, target)
+			if ok and w then
+				d.band        = w.band
+				d.wifi_ifname = w.ifname
+				d.tx_rate     = w.tx_rate
+				d.rx_rate     = w.rx_rate
+				d.rssi        = w.rssi
+				d.online      = 1
+			end
 		end
 		json_out(d)
 	end
@@ -618,10 +583,10 @@ override_usage_times = function(list)
 end
 
 -- 应用统计饼图：今天的 APP 活跃使用时长。
--- 挂机的长连接（QQ/微信/搜狗输入法的心跳）不算时间：采集器按采样窗口
--- 判定，一个窗口搬不够 2 KiB 就不计这一窗口的秒数。数据源 apps.json 的
--- 「a」字段；appid=0 单独标「未识别」——本机特征库覆盖不足，丢掉它整个
--- 饼图就是空的，这正是之前「APP 统计没有数据」的原因。
+-- 挂机的长连接（QQ/微信/输入法的心跳）不算时间：flowd 每轮采样里应用
+-- 真的搬了超过心跳阈值的字节才计一轮。数据源 oaf-flowd 1.8.0 的
+-- apps.json「a」字段；采样器没有活跃数据（刚重启、旧版本）时退回访问
+-- 会话的口径——那是"连接挂着"的时长，数字会明显偏大。
 function api_dev_visit_time(mac)
 	local target = mac_arg(mac)
 	if target == "" then json_out({}); return end
@@ -636,14 +601,18 @@ function api_dev_visit_time(mac)
 	if act and next(act.apps) ~= nil then
 		local merged = {}
 		for id, t in pairs(act.apps) do
-			-- 名字查不到时显示「未知应用」，绝不把内部编号（App12 / #12）抛给用户
-			local nm = (id > 0 and names[tostring(id)]) or UNKNOWN_NAME
-			local slot = merged[id]
-			if not slot then
-				slot = { id = id, t = 0, name = nm }
-				merged[id] = slot
+			-- 仅显示已知特征应用：conntrack mark 为 0（识别内核不在、或该
+			-- 流还没被分类）、以及内置 559 条表之外认不出的 appid，直接
+			-- 跳过——页面上不出现说不清来路的「其他」大扇区
+			local nm = id > 0 and names[tostring(id)] or nil
+			if nm then
+				local slot = merged[id]
+				if not slot then
+					slot = { id = id, t = 0, name = nm }
+					merged[id] = slot
+				end
+				slot.t = slot.t + t
 			end
-			slot.t = slot.t + t
 		end
 		local out = {}
 		for _, slot in pairs(merged) do out[#out + 1] = slot end
@@ -693,45 +662,29 @@ function api_dev_visit_list(mac)
 	if req_size < 1 then req_size = 15 end
 	if req_size > 200 then req_size = 200 end
 
-	-- 数据源与「今日常用APP」一致：采样器只在某一轮该应用真的搬了 >= 2 KiB
-	-- 时才记一段（active.json），所以纯挂机的长连接——QQ、搜狗输入法、各类
-	-- 推送通道每分钟一条心跳——根本不会产生记录。时间戳是秒级 ft/lt，
-	-- 时长直接相减，不再有"末次=首次、时长 0"那种噪音行。
-	local all, meta, persisted
-	local segs = traffic and traffic.client_active_segments(target)
-	-- 注意这里是 #segs >= 0：只要采样器在跑（active.json 可读），就严格按
-	-- 新口径出表，哪怕结果是空表。不能因为"这台设备暂时没有段"就退回老
-	-- 的会话表——那会把未识别和挂机心跳又放回来，正是这次要去掉的东西。
-	if type(segs) == "table" then
+	-- 与「今日常用 APP」同源：apps.json 的活跃秒数 + 字节，按小时桶
+	-- 2 KiB 门槛过滤。挂机心跳、特征库认不出的应用都不进表。
+	local all, meta, persisted = {}, nil, true
+	local visits = traffic and traffic.client_app_visits(target)
+	if type(visits) == "table" then
 		local names = load_app_names()
 		local now = os.time()
-		all = {}
-		for _, sg in ipairs(segs) do
-			local ft = tonumber(sg.ft) or 0
-			local lt = tonumber(sg.lt) or ft
-			local id = tonumber(sg.id) or 0
-			-- 认不出应用的段不进访问记录：一行「未识别」既看不出访问了什么，
-			-- 又会把表格刷满。等特征库补上规则、mark 能报出 appid 之后，
-			-- 这些访问自然会带着名字出现。
-			local nm = (id > 0 and names[tostring(id)]) or nil
-			if ft > 0 and nm then
+		for _, v in ipairs(visits) do
+			local nm = (v.id > 0 and names[tostring(v.id)]) or nil
+			if nm then
 				all[#all + 1] = {
-					id = id, ft = ft, lt = lt,
-					tt = (lt > ft) and (lt - ft) or 0,
-					-- 两分钟内有流量就算还在线（与 GAP_SEC 同量级）
-					online = (now - lt <= 120) and 1 or 0,
-					name = nm,
+					id = v.id, name = nm,
+					ft = v.ft, lt = v.lt, tt = v.tt,
+					bytes = v.bytes,
+					online = (now - v.lt <= 120) and 1 or 0,
 				}
 			end
 		end
 		table.sort(all, function(x, y)
 			if x.lt ~= y.lt then return x.lt > y.lt end
-			return x.ft > y.ft
+			return (x.bytes or 0) > (y.bytes or 0)
 		end)
-		persisted = true
 	else
-		-- 采样器刚重启、active.json 还没写出：退回会话表，宁可多几条噪音，
-		-- 也不要整张表空着。下一次采样（<10 s）就会切回正路。
 		all, meta, persisted = merged_sessions(target, os.time() - VISIT_KEEP_SECONDS)
 	end
 
@@ -751,7 +704,7 @@ function api_dev_visit_list(mac)
 		total_page = total_page,
 		page       = req_page,
 		page_size  = req_size,
-		keep_days  = 30,
+		keep_days  = 1,
 		persisted  = persisted,
 	})
 end
@@ -780,101 +733,113 @@ function api_get_hourly_stats(mac)
 	end
 	local names = load_app_names()
 
-	-- 「今日常用 APP」= 每应用每小时的活跃秒数 + 字节。
-	--   * 活跃秒数来自采集器的 2 KiB/窗口门槛：挂机一天的 QQ、搜狗输入法、
-	--     推送长连接只有几百字节心跳，一个窗口都计不上。
-	--   * 字节来自 conntrack（PPE 卸载后持续回写），永远有数。
-	--   * appid=0 明确显示「未识别」而不是丢掉：本机特征库覆盖不足时
-	--     绝大多数字节都落在 0，丢掉它整张图就是空的（本次修的 bug）。
-	local hourApps = {}  -- [hour][appid] = {appid, name, time, bytes}
-	local function slot_for(h, id)
-		local bucket = hourApps[h]
-		if not bucket then bucket = {}; hourApps[h] = bucket end
-		local slot = bucket[id]
-		if not slot then
-			slot = {
-				appid = id,
-				name  = (id > 0 and names[tostring(id)]) or UNKNOWN_NAME,
-				time  = 0, bytes = 0,
-			}
-			bucket[id] = slot
-		end
-		return slot
-	end
-
-	local act, appBytes
+	-- 会话按小时切片：拼音/QQ 这类长连接一挂就是几个小时，整段塞进开始
+	-- 小时会出现「一个小时内用了 3H」的怪柱子。按每小时的重叠秒数占比
+	-- 分摊，任何一小时都不超过 3600 秒，各小时之和仍等于饼图/访问记录
+	-- 列表的合计。
+	--
+	-- 优先用 flowd 的活跃秒数（1.8.0）：每轮采样里应用真的搬了超过心跳
+	-- 阈值的字节才计一轮，挂机长连接在这里一秒都没有，单小时也永远不会
+	-- 超过 3600。采样器拿不到活跃数据时才退回会话切片。
+	local hourApps = {}  -- [hour][appid] = {appid, icon, name, time}
+	local act
 	if traffic then
 		local ok, v = pcall(traffic.client_app_active, target)
 		if ok then act = v end
-		local ok2, v2 = pcall(traffic.client_app_bytes, target)
-		if ok2 then appBytes = v2 end
 	end
-	if act and type(act.hours) == "table" and next(act.hours) ~= nil then
+	if act and next(act.hours) ~= nil then
 		for h, row in pairs(act.hours) do
+			local bucket = hourApps[h]
+			if not bucket then bucket = {}; hourApps[h] = bucket end
 			for id, secs in pairs(row) do
-				local s = slot_for(tonumber(h) or 0, tonumber(id) or 0)
-				s.time = s.time + (tonumber(secs) or 0)
+				-- 与饼图同一规则：无名的 id（含 mark=0）并进「其他」
+				local nm = id > 0 and names[tostring(id)] or nil
+				local key = nm and id or 0
+				local slot = bucket[key]
+				if not slot then
+					slot = { appid = key, time = 0, name = nm or UNKNOWN_NAME }
+					bucket[key] = slot
+				end
+				slot.time = slot.time + secs
 			end
 		end
 	else
 		local function add_app_hour(h, rec, secs)
-			if secs <= 0 then return end
-			local id = tonumber(rec.id) or 0
-			local slot = slot_for(h, id)
-			slot.time = slot.time + (tonumber(secs) or 0)
-			-- 会话表带应用名，采样器的 appid 只有 id；名字缺了才补
-			local nm = rec.name
-			if nm and nm ~= "" and slot.name == UNKNOWN_NAME then
-				slot.name = nm
-			end
+		if secs <= 0 then return end
+		local id = tonumber(rec.id) or 0
+		local row = hourApps[h]
+		if not row then row = {}; hourApps[h] = row end
+		local slot = row[id]
+		if not slot then
+			slot = { appid = id, icon = rec.icon, name = rec.name, time = 0 }
+			row[id] = slot
 		end
-		for _, rec in ipairs(merged_sessions(target, today_start())) do
-			local id = tonumber(rec.id) or 0
-			if id > 0 then
-				local ft = tonumber(rec.ft) or 0
-				local lt = tonumber(rec.lt) or ft
-				if lt < ft then lt = ft end
-				local span = lt - ft
-				local tt = tonumber(rec.tt) or span
-				if span <= 0 then
-					-- 没有跨度可言（瞬时记录），整段记入开始小时（北京时间）
-					add_app_hour(tonumber(ldate("%H", ft)) or 0, rec, tt)
-				else
-					-- 切出与每个「北京小时」重叠的段，按时长占比分摊 tt。
-					-- 用整数取模求小时边界，不依赖设备 TZ。
-					local segs = {}
-					local cur = ft
-					while cur < lt do
-						local shifted = cur + TZ_OFFSET
-						local hb = shifted - (shifted % 3600) - TZ_OFFSET
-						local seg = (lt < hb + 3600) and lt or (hb + 3600)
-						segs[#segs + 1] = { hour = tonumber(ldate("%H", hb)) or 0, ov = seg - cur }
-						cur = seg
+		slot.time = slot.time + secs
+		if (not slot.name or slot.name == "") and rec.name and rec.name ~= "" then
+			slot.name = rec.name
+		end
+	end
+	for _, rec in ipairs(merged_sessions(target, today_start())) do
+		local id = tonumber(rec.id) or 0
+		if id > 0 then
+			local ft = tonumber(rec.ft) or 0
+			local lt = tonumber(rec.lt) or ft
+			if lt < ft then lt = ft end
+			local span = lt - ft
+			local tt = tonumber(rec.tt) or span
+			if span <= 0 then
+				-- 没有跨度可言（瞬时记录），整段记入开始小时
+				add_app_hour(tonumber(os.date("*t", ft).hour) or 0, rec, tt)
+			else
+				-- 切出与每个小时重叠的段，按时长占比分摊 tt，取整余数记到
+				-- 最后一段，保证合计守恒
+				local segs = {}
+				local cur = ft
+				while cur < lt do
+					local t = os.date("*t", cur)
+					local hb = os.time({ year = t.year, month = t.month,
+						day = t.day, hour = t.hour, min = 0, sec = 0 })
+					local seg = (lt < hb + 3600) and lt or (hb + 3600)
+					segs[#segs + 1] = { hour = t.hour, ov = seg - cur }
+					cur = seg
+				end
+				local allocated = 0
+				for i, sg in ipairs(segs) do
+					local share
+					if i == #segs then
+						share = tt - allocated
+						if share < 0 then share = 0 end
+					else
+						share = math.floor(tt * sg.ov / span + 0.5)
+						allocated = allocated + share
 					end
-					local allocated = 0
-					for i, sg in ipairs(segs) do
-						local share
-						if i == #segs then
-							share = tt - allocated
-							if share < 0 then share = 0 end
-						else
-							share = math.floor(tt * sg.ov / span + 0.5)
-							allocated = allocated + share
-						end
-						add_app_hour(sg.hour, rec, share)
-					end
+					add_app_hour(sg.hour, rec, share)
 				end
 			end
 		end
+	end
 	end -- else（无活跃数据时的会话切片）
 
-	-- 字节轴始终叠加：哪怕活跃秒数全是 0（挂机长连接被 2 KiB 门槛剔除），
-	-- 真正搬过字节的应用仍然会画出来，图不会空。
-	if type(appBytes) == "table" then
-		for h, row in pairs(appBytes) do
-			for id, b in pairs(row) do
-				local s = slot_for(tonumber(h) or 0, tonumber(id) or 0)
-				s.bytes = s.bytes + (tonumber(b) or 0)
+	-- 每应用每小时的字节数，与「今日常用 APP」的活跃秒数同一份 apps.json。
+	-- 无名 id 与饼图一样并进兜底桶 0，柱状图会把这个桶过滤掉。
+	if traffic then
+		local ok, ab = pcall(traffic.client_app_bytes, target)
+		if ok and type(ab) == "table" then
+			for h, row in pairs(ab) do
+				local hh = tonumber(h) or 0
+				local bucket = hourApps[hh]
+				if not bucket then bucket = {}; hourApps[hh] = bucket end
+				for id, b in pairs(row) do
+					local aid = tonumber(id) or 0
+					local nm = aid > 0 and names[tostring(aid)] or nil
+					local key = nm and aid or 0
+					local slot = bucket[key]
+					if not slot then
+						slot = { appid = key, time = 0, bytes = 0, name = nm or UNKNOWN_NAME }
+						bucket[key] = slot
+					end
+					slot.bytes = (slot.bytes or 0) + (tonumber(b) or 0)
+				end
 			end
 		end
 	end
@@ -907,9 +872,13 @@ function api_get_hourly_stats(mac)
 			table.sort(ids, function(a, b)
 				local ba, bb = row[a].bytes or 0, row[b].bytes or 0
 				if ba ~= bb then return ba > bb end
-				return (row[a].time or 0) > (row[b].time or 0)
+				return row[a].time > row[b].time
 			end)
-			for _, aid in ipairs(ids) do apps[#apps + 1] = row[aid] end
+			for _, aid in ipairs(ids) do
+				local slot = row[aid]
+				slot.bytes = slot.bytes or 0
+				apps[#apps + 1] = slot
+			end
 		end
 		local tr
 		if fh then
@@ -942,8 +911,8 @@ function api_app_traffic(mac)
 		json_out({ mac = target, apps = {} })
 		return
 	end
-	-- apps.json only carries ids (the conntrack mark). Attach the display
-	-- name here so the byte table does not need a second round trip.
+	-- apps.json 里只有 appid。把内置特征库名表附上，表格不必再发一轮请求，
+	-- 也和详情图、访问记录里的应用名保持同一套叫法。
 	local apps = traffic.app_traffic(target) or {}
 	local names = load_app_names()
 	for _, a in ipairs(apps) do
@@ -973,17 +942,17 @@ end
 
 -- ---------------------------------------------------------------- 历史流量
 --
--- 数据来源是采集器落盘的日汇总（tmpfs，重启清零）：
---   /tmp/oaf-flow/day/YYYY-MM-DD.json   { clients: [ { mac, day_up, day_down, ... } ] }
--- 今天的文件也在实时更新，所以今天和以前用同一套读法，不必再走 ubus。
+-- 数据来源改成 oaf-flowd 落盘的日汇总：
+--   /etc/oaf/data/day/YYYY-MM-DD.json   { clients: [ { mac, day_up, day_down, ... } ] }
+-- 今天的文件也是它在实时更新，所以今天和以前用同一套读法，不必再走 ubus。
 --
 -- 为什么不走 ubus：get_hourly_top_apps 会把 file_json 的子对象交给 data_obj 后
 -- 又 put 掉父对象，oafd 会 use-after-free 崩掉（实测每调一次 oafd 就被 procd
 -- 重启一次，当天的计数器跟着清零）。历史页面固定看 30 天，一天一次调用就会
 -- 反复踩这个坑，索性整条链路都不碰它。
 
--- 日汇总全部在 tmpfs 上（init 脚本预建 /tmp/oaf-flow/day/），重启清零。
-local OAF_FLOW_DIRS = { "/tmp/oaf-flow" }
+-- 日汇总固定写在 overlay 的 /etc/oaf/data 下（由 init 脚本预建 day/ mon/）。
+local OAF_FLOW_DIRS = { "/etc/oaf/data" }
 
 local _flow_day_dir
 
@@ -1020,7 +989,7 @@ end
 
 -- flowd 的日汇总文件（今天和历史同一个格式）
 local function read_flow_day(mac_addr, ts)
-	local day = ldate("%Y-%m-%d", ts)
+	local day = os.date("%Y-%m-%d", ts)
 	local raw = fs.readfile(string.format("%s/%s.json", flow_day_dir(), day))
 	if not raw or raw == "" then return nil end
 	local obj = jsonc.parse(raw)
@@ -1043,7 +1012,7 @@ local function read_day_file(mac_addr, ts)
 
 	-- 兜底：老布局（oafd 的 client_data）
 	local root  = data_root()
-	local day   = ldate("%Y-%m-%d", ts)
+	local day   = os.date("%Y-%m-%d", ts)
 	local base  = mac_addr:gsub(":", "_")
 
 	-- 目录名是 MAC 小写，个别版本写过大写，两种都试
@@ -1094,8 +1063,7 @@ function api_history_traffic(mac)
 			json_out({ code = 1, message = "invalid date", days = {}, summary = { up_bytes = 0, down_bytes = 0, total_bytes = 0 } })
 			return
 		end
-		-- 用户选的是北京时间日期，构造 UTC 午夜再减 8 小时才是北京 0 点
-		local ts = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(dd), hour = 0, min = 0, sec = 0 }) - TZ_OFFSET
+		local ts = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(dd), hour = 0, min = 0, sec = 0 })
 		if not ts or ts > today then
 			json_out({ code = 1, message = "future date", days = {}, summary = { up_bytes = 0, down_bytes = 0, total_bytes = 0 } })
 			return
@@ -1113,7 +1081,7 @@ function api_history_traffic(mac)
 		total_down = total_down + down
 		days[#days + 1] = {
 			date        = ts,
-			date_str    = ldate("%Y-%m-%d", ts),
+			date_str    = os.date("%Y-%m-%d", ts),
 			up_bytes    = up,
 			down_bytes  = down,
 			total_bytes = up + down,

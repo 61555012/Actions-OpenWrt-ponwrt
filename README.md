@@ -25,7 +25,7 @@ files/                                         # 原样合并进固件根目录
   etc/init.d/oaf-ctstat                              # 采集器服务（procd）
   usr/share/oaf_status/vendors.json                  # OUI 厂商表（8712 前缀）
   www/luci-static/resources/oui/                     # 厂商图标识别（oui.js + 35 个 SVG + 前缀库）
-  www/cgi-bin/oaf-live                               # 1 秒快车道（sh + cat，30 ms）
+  www/cgi-bin/oaf_live                               # 1 秒快车道（Lua + ubus 会话校验，8 ms）
 ```
 
 ## 编译出来的东西

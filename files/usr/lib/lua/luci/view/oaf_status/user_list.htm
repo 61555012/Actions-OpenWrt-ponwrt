@@ -1,5 +1,4 @@
 ﻿<link rel="stylesheet" href="<%=resource%>/oaf_status/css/common.css?v=7.0">
-<link rel="stylesheet" href="<%=resource%>/oaf_status/css/tune.css?v=7.1">
 <% local dsp=require "luci.dispatcher" -%>
 
 <script type="text/javascript" src="<%=resource%>/oaf_status/jquery-3.7.1.min.js?v=7.0"></script>
@@ -53,6 +52,10 @@
 		let page_size = 15;
 		let total_num = 0;
 		let total_page = 1;
+		let app_class_name_map = {};
+		let app_class_map_loaded = false;
+		let user_session_enable = false;
+		let user_rssi_enable = false;
 		let view_mode = 'list';
 
 		function load_view_mode() {
@@ -130,6 +133,75 @@
 			};
 		}
 
+		// 隐藏列必须用属性 + !important 关，不能写内联 display:none ——
+		// 表格为了压住 Argon 的 flex 行用了 `display: table-cell !important`，
+		// 内联样式会输给它，表头就会比数据行多出一格，整表错位。
+		function setColumnOff(el, off) {
+			if (!el) return;
+			if (off) el.setAttribute('data-col-off', '1');
+			else el.removeAttribute('data-col-off');
+			if (el.style && el.style.display) el.style.display = '';
+		}
+
+		function applyCapabilityColumnVisibility() {
+			var sessionHeaderEl = document.getElementById('session_count_header');
+			var rssiHeaderEl = document.getElementById('rssi_header');
+			var loadingCellEl = document.getElementById('user_status_loading_cell');
+			setColumnOff(sessionHeaderEl, !user_session_enable);
+			setColumnOff(rssiHeaderEl, !user_rssi_enable);
+			if (loadingCellEl) {
+				loadingCellEl.colSpan = 10 + (user_session_enable ? 1 : 0) + (user_rssi_enable ? 1 : 0);
+			}
+		}
+
+		function loadSystemBaseInfo(callback) {
+			new XHR().get("<%=url('admin/status/oaf_users/api/get_system_base_info')%>", {}, function(x, data) {
+				user_session_enable = !!(data && parseInt(data.user_session_enable, 10) === 1);
+				user_rssi_enable = !!(data && Object.prototype.hasOwnProperty.call(data, 'wireless_support'));
+				applyCapabilityColumnVisibility();
+				if (callback) callback();
+			});
+		}
+
+		function loadAppClassNameMap(callback) {
+			if (app_class_map_loaded) {
+				if (callback) callback();
+				return;
+			}
+			new XHR().get("<%=url('admin/status/oaf_users/api/get_class_list')%>", {}, function(x, data) {
+				var classMap = {};
+				var classPayload = data || {};
+				if (!Array.isArray(classPayload.class_list) && classPayload.data && Array.isArray(classPayload.data.class_list)) {
+					classPayload = classPayload.data;
+				}
+				var classList = Array.isArray(classPayload.class_list) ? classPayload.class_list : [];
+				classList.forEach(function(item) {
+					var className = item && item.name ? item.name : '';
+					var hasMapped = false;
+					var classId = parseInt(item && item.id, 10);
+					if (!isNaN(classId) && classId > 0) {
+						classMap[classId] = className || ('Class-' + classId);
+						hasMapped = true;
+					}
+					if (!hasMapped && Array.isArray(item && item.app_list)) {
+						item.app_list.forEach(function(appItem) {
+							var parts = String(appItem || '').split(',');
+							var appId = parseInt(parts[0], 10);
+							if (!isNaN(appId) && appId > 0) {
+								var derivedClassId = Math.floor(appId / 1000);
+								if (derivedClassId > 0 && !classMap[derivedClassId]) {
+									classMap[derivedClassId] = className || ('Class-' + derivedClassId);
+								}
+							}
+						});
+					}
+				});
+				app_class_name_map = classMap;
+				app_class_map_loaded = true;
+				if (callback) callback();
+			});
+		}
+
 		// ---------- 轮询重绘时守住滚动位置 ----------
 		// Argon 把整页滚动放在 .main-right（.main 也带 overflow-y:auto），window 不滚。
 		// 只恢复 window.scrollY 的话，empty() 一瞬间 .main-right.scrollTop 会被
@@ -138,6 +210,7 @@
 		var lastListSignature = '';
 		var pendingPaintTimer = 0;
 		var interactionUntil = 0;
+		var slowFastUntil = 0;
 
 		function getScrollNodes() {
 			var nodes = [];
@@ -209,6 +282,8 @@
 		// 手指/滚轮正在滑动时先别重建 DOM，等停下来再补画一次
 		function noteUserInteraction() {
 			interactionUntil = Date.now() + 1600;
+			// 人还在看的时候慢通道保持 5s 的即时性；静置 20 秒后放宽到 15s
+			slowFastUntil = Date.now() + 20000;
 		}
 		['touchstart', 'touchmove', 'wheel', 'mousedown', 'pointerdown', 'keydown'].forEach(function (ev) {
 			try { document.addEventListener(ev, noteUserInteraction, { passive: true }); } catch (e) {}
@@ -224,13 +299,14 @@
 		// data-appsig 就地重画那一格，代价是几个 img 节点，不是整行。
 		function listStructureSignature(d) {
 			var list = d.list || [];
-			var parts = [d.total_num, d.total_page, d.page, view_mode];
+			var parts = [d.total_num, d.total_page, d.page, view_mode,
+				user_session_enable ? 1 : 0, user_rssi_enable ? 1 : 0];
 			for (var i = 0; i < list.length; i++) {
 				var u = list[i];
 				var hasV6 = (u.ip6 || u.up_rate6 > 0 || u.down_rate6 > 0 ||
 					u.today_up6_bytes > 0 || u.today_down6_bytes > 0) ? 1 : 0;
-				// 会话数、上网时长、正在访问的网址都是纯文本，走
-				// applySlowValues() 就地更新；放进签名的话 
+				// 信号、会话数、上网时长、正在访问的网址都是纯文本，走
+				// applySlowValues() 就地更新；放进签名的话 rssi 抖 1dBm、
 				// 网址换一条，就要把整张表重造一次。
 				parts.push([u.mac, u.ip, u.hostname, u.nickname, u.vendor,
 					u.online, u.active, hasV6].join('|'));
@@ -282,7 +358,7 @@
 						return;
 					}
 					var signature = listStructureSignature(data.data);
-					// 结构没变就不重建 DOM，只把会话/时长这些纯文本就地刷一遍；
+					// 结构没变就不重建 DOM，只把信号/会话/时长这些纯文本就地刷一遍；
 					// 滚动位置自然不会抖，也省掉每 3 秒重造几百个节点。
 					if (!force && listDomReady && signature === lastListSignature) {
 						user_list_data = data.data;
@@ -318,6 +394,14 @@
 		// 几百字节；只改带 data-live 的文本节点，不重建 DOM、不碰滚动位置。
 		var liveMap = Object.create(null);
 		var liveInFlight = false;
+		// 精简 CGI 优先，失败一次就回退到 LuCI 接口（会话过期、旧固件等）
+		var LIVE_LEAN_URL = '/cgi-bin/oaf_live';
+		var LIVE_API_URL = "<%=url('admin/status/oaf_users/api/live_rates')%>";
+		// 当前会话 id：CGI 拿不到 Cookie（uhttpd 不透传），由页面在服务端取出来
+		// 带在 POST body 里，URL 和浏览器历史里不会出现会话串
+		var OAF_SID = "<%=luci.http.getcookie('sysauth_http') or luci.http.getcookie('sysauth') or ''%>";
+		var liveLean = !!OAF_SID;
+		var livePeak = 0;
 
 		function setLiveText(el, text) {
 			if (!el) return;
@@ -389,11 +473,10 @@
 					// 连接数跟速率走同一条 1 秒通道；离线设备显示 --。
 					// parseInt(u.online) 在慢通道才更新，这里直接看有没有
 					// 连接更可靠：快照里没有这台设备的行就是掉线了。
-					var flowsEl = box.querySelector('[data-live="flows"]');
+					var flowsEl = box.querySelector('[data-live=\"flows\"]');
 					if (flowsEl) {
-						// live.flows 本身就是 v4 + v6 的合计，只写这一个数，不再挂 V6 小标
-						var want = (live.flows > 0) ? String(live.flows) : '--';
-						if (flowsEl.textContent !== want) flowsEl.textContent = want;
+						var liveFlows = (live.flows > 0) ? String(live.flows) : '--';
+						if (flowsEl.textContent !== liveFlows) flowsEl.textContent = liveFlows;
 					}
 					setLiveText(box.querySelector('[data-live=\"up6\"]'), formatRate(live.up_rate6));
 					setLiveText(box.querySelector('[data-live=\"down6\"]'), formatRate(live.down_rate6));
@@ -412,17 +495,34 @@
 			}
 		}
 
-		// 慢通道的纯文本字段：会话数、上网时长。
+		// 慢通道的纯文本字段：信号、会话数、上网时长。
 		function applySlowValues() {
 			var list = (user_list_data && user_list_data.list) || [];
 			var targets = liveTargetMap();
 			for (var i = 0; i < list.length; i++) {
 				var u = list[i];
 				var online = parseInt(u.online, 10) === 1;
+				var sessionText = '--';
+				if (online) {
+					var sn = parseInt(u.session, 10);
+					sessionText = isNaN(sn) ? '0' : String(sn);
+				}
 				var timeText = get_display_time(u.today_active_time || 0);
 				var scopes = targets[String(list[i].mac || '').toUpperCase()] || [];
 				for (var s = 0; s < scopes.length; s++) {
+					setLiveText(scopes[s].querySelector('[data-live=\"sessions\"]'), sessionText);
+					paintRssi(scopes[s].querySelector('[data-live=\"rssi\"]'), u.rssi);
 					setLiveText(scopes[s].querySelector('[data-live=\"nettime\"]'), timeText);
+					var urlEl = scopes[s].querySelector('[data-live=\"url\"]');
+					if (urlEl) {
+						var curUrl = online ? (u.url || '--') : '--';
+						var shown = curUrl.length > 20 ? curUrl.substring(0, 20) + '...' : curUrl;
+						var target = urlEl.tagName === 'TD' ? urlEl.querySelector('span') : urlEl;
+						if (target) {
+							if (target.textContent !== shown) target.textContent = shown;
+							if (target.getAttribute('title') !== curUrl) target.setAttribute('title', curUrl);
+						}
+					}
 					// 应用图标：指纹不变就不碰。以前这几枚图标算在结构签名里，
 					// 设备一换页面就整表重造，是列表页最大的 DOM 开销。
 					paintAppSlot(scopes[s].querySelector('[data-live=\"apps\"]'), u);
@@ -445,106 +545,53 @@
 			return liveMacsCache;
 		}
 
-		// ---------- 1 秒快通道 ----------
-		// 以前每秒打一次 LuCI 接口：每次都要起一个完整的 Lua CGI（实测中位
-		// 190 ms 才回、常驻 10%+ 一个核，设备一多还要把整页 MAC 拼上参数）。
-		// 现在直接读 /cgi-bin/oaf-live —— 一段 sh：写一次「有人在看」的心跳，
-		// 再把采集器写好的 stats.json cat 出来。没有 Lua、没有 dispatcher，
-		// 实测 30 ms，顺带把心跳也带上了（采集器就是靠它从 20 秒切到 1 秒）。
-		// 拿不到（老固件 / 脚本被删 / 非 200）就永久回退到原接口，行为不变。
-		var LIVE_URL = '/cgi-bin/oaf-live';
-		var liveUseCgi = true;
-
-		function liveFromStats(j) {
-			var cs = (j && j.clients) || [];
-			var list = [];
-			for (var i = 0; i < cs.length; i++) {
-				var c = cs[i] || {};
-				var mac = String(c.mac || '').toUpperCase();
-				if (!mac) continue;
-				list.push({
-					mac: mac,
-					ip6: c.ip6 || '',
-					up_rate: c.rate_up || 0,
-					down_rate: c.rate_down || 0,
-					up_rate6: c.rate_up6 || 0,
-					down_rate6: c.rate_down6 || 0,
-					today_up_bytes: c.day_up || 0,
-					today_down_bytes: c.day_down || 0,
-					today_up6_bytes: c.day_up6 || 0,
-					today_down6_bytes: c.day_down6 || 0,
-					today_active_time: c.day_active || 0,
-					today_online_time: c.day_online || 0,
-					flows: c.flows || 0
-				});
-			}
-			return list;
-		}
-
-		function applyLiveList(list) {
-			var m = Object.create(null);
-			for (var i = 0; i < list.length; i++) {
-				var c = list[i];
-				if (c && c.mac) m[String(c.mac).toUpperCase()] = c;
-			}
-			liveMap = m;
-			applyLiveValues();
-		}
-
 		function fetchLiveRates() {
 			if (liveInFlight || document.hidden || !listDomReady) return;
 			liveInFlight = true;
-			var settled = false;
 			// 请求没回来（断网 / 路由器忙）时别把快通道永久卡死
-			var guard = setTimeout(function () { liveInFlight = false; }, 4000);
-
-			function finish(list) {
-				if (settled) return;
-				settled = true;
-				clearTimeout(guard);
+			setTimeout(function () { liveInFlight = false; }, 4000);
+			var macs = liveMacsParam();
+			function apply(data) {
 				liveInFlight = false;
-				if (list) applyLiveList(list);
+				if (!data || !Array.isArray(data.list)) return false;
+				var m = Object.create(null), peak = 0;
+				for (var i = 0; i < data.list.length; i++) {
+					var c = data.list[i];
+					if (!c || !c.mac) continue;
+					m[String(c.mac).toUpperCase()] = c;
+					var r = (c.up_rate || 0) + (c.down_rate || 0) +
+						(c.up_rate6 || 0) + (c.down_rate6 || 0);
+					if (r > peak) peak = r;
+				}
+				liveMap = m;
+				livePeak = peak;
+				applyLiveValues();
+				return true;
 			}
-			function viaApi() {
-				var macs = liveMacsParam();
-				new XHR().get("<%=url('admin/status/oaf_users/api/live_rates')%>", macs ? { macs: macs } : null,
+			function viaLuCI() {
+				new XHR().get(LIVE_API_URL, macs ? { macs: macs } : null,
+					function (x, d) { apply(d); liveInFlight = false; });
+			}
+			// 优先走精简 CGI：同样的数据，省掉 LuCI 每请求 ~65ms 的启动。
+			// 会话 id 由服务端渲染进页面，随 POST body 送上（uhttpd 不给 CGI
+			// 传 Cookie 和自定义头）。403/500/旧固件没有这个文件时自动回退
+			// 到 LuCI 接口，并把 liveLean 关掉，之后不再重试。
+			if (liveLean && OAF_SID) {
+				new XHR().post(LIVE_LEAN_URL, { sid: OAF_SID, macs: macs || '' },
 					function (x, data) {
-						finish(data && Array.isArray(data.list) ? data.list : null);
-					}
-				);
+						if (apply(data)) return;
+						liveLean = false;
+						viaLuCI();
+					});
+				return;
 			}
-
-			if (!liveUseCgi) { viaApi(); return; }
-
-			var xhr;
-			try {
-				xhr = new XMLHttpRequest();
-				xhr.open('GET', LIVE_URL + '?t=' + Date.now(), true);
-				xhr.timeout = 3000;
-				xhr.onload = function () {
-					if (xhr.status === 200) {
-						var j = null;
-						try { j = JSON.parse(xhr.responseText); } catch (e) { j = null; }
-						if (j && j.clients) { finish(liveFromStats(j)); return; }
-					}
-					liveUseCgi = false;
-					viaApi();
-				};
-				xhr.onerror = xhr.ontimeout = function () {
-					liveUseCgi = false;
-					viaApi();
-				};
-				xhr.send();
-			} catch (e) {
-				liveUseCgi = false;
-				viaApi();
-			}
+			viaLuCI();
 		}
 
-		// ---------- 有人看 1 秒，挂后台不刷新 ----------
-		// 上行速率 / 下行速率 / 上网流量走快通道，前台恒定 1 秒
-		// （与采集器的 1 秒采样同节奏，桌面和手机一样）；标签页隐藏时
-		// 两个定时器全部清掉，一次请求都不发，回到前台立刻补一次。
+		// ---------- 前台 1 秒刷速率，后台完全停 ----------
+		// 两个通道的代价不一样：快通道只读 /tmp 里的 stats.json（几百字节），
+		// 慢通道要走 fwx 的 ubus + 会话/应用合并。手机上按 2 秒刷一次，
+		// 速率照样是「秒级」，但请求量直接砍一半，待机时也更省电。
 		var slowTimer = 0, liveTimer = 0;
 		var NARROW_QUERY = '(max-width: 768px)';
 
@@ -559,14 +606,43 @@
 		function scheduleSlow() {
 			clearTimeout(slowTimer);
 			if (document.hidden) return;
-			// 慢通道只负责状态/应用/时长这类分钟级字段，5s（手机 8s）足够；
-			// 速率和今日流量走快通道，不受影响。
-			var delay = isNarrow() ? 8000 : 5000;
+			// 慢通道只负责状态/应用/时长这类分钟级字段，速率和今日流量走快通道，
+			// 不依赖它。一次 get_all_users 在 6.1 上实测 150~220 ms（大头是 LuCI
+			// 每请求的进程启动），按 5s 跑等于常驻 3%~4% 一个核。
+			// 所以：刚动过页面（滚动/点击/翻页）的 20 秒内保持 5s（手机 8s），
+			// 静置后放宽到 15s（手机 20s）。
+			var narrow = isNarrow();
+			var hot = Date.now() < slowFastUntil;
+			var delay = hot ? (narrow ? 8000 : 5000) : (narrow ? 20000 : 15000);
 			slowTimer = setTimeout(function () {
 				if (document.hidden) return;
 				getAllUsersData(cur_page);
 				scheduleSlow();
 			}, delay);
+		}
+
+		// 交互/流量自适应：动过鼠标键盘、或带宽真的在跑 → 1 秒；静置且没流量 → 2 秒。
+		// 页面挂在墙上没人看、网络也闲着的时候，每秒一次请求纯属白烧 CPU。
+		var lastInteract = 0;
+		function markInteract() {
+			var t = Date.now();
+			if (t - lastInteract < 900) return;
+			lastInteract = t;
+		}
+		(function () {
+			var evs = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'wheel'];
+			for (var i = 0; i < evs.length; i++) {
+				try { document.addEventListener(evs[i], markInteract, { passive: true }); }
+				catch (e) { try { document.addEventListener(evs[i], markInteract, false); } catch (e2) {} }
+			}
+		})();
+
+		function liveDelay() {
+			if (isNarrow()) return 2000;
+			// 64 KB/s 以上算「正在用网」，此时保持 1 秒；静置 20 秒后降到 2 秒
+			if (livePeak > 65536) return 1000;
+			if (Date.now() - lastInteract < 20000) return 1000;
+			return 2000;
 		}
 
 		function scheduleLive() {
@@ -576,7 +652,7 @@
 				if (document.hidden) return;
 				fetchLiveRates();
 				scheduleLive();
-			}, 1000);
+			}, liveDelay());
 		}
 
 		function startPolling() {
@@ -604,15 +680,20 @@
 			cur_page = 1;
 			bind_view_mode_events();
 			load_view_mode();
+			applyCapabilityColumnVisibility();
+			apply_view_mode();
+			loadAppClassNameMap();
 			// 品牌 logo 是异步到位的，到了立刻重画一次，别等下一个轮询
 			loadOui().then(function (db) {
 				if (db && user_list_data && user_list_data.list) {
 					paintUserList();
 				}
 			});
-			getAllUsersData(cur_page, true, function () {
-				fetchLiveRates();
-				startPolling();
+			loadSystemBaseInfo(function() {
+				getAllUsersData(cur_page, true, function () {
+					fetchLiveRates();
+					startPolling();
+				});
 			});
 		});
 
@@ -687,6 +768,39 @@
 			} else {
 				return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
 			}
+		}
+
+		// 只返回纯文本：慢通道是用 textContent 写回节点的，返回 HTML 会被
+		// 原样显示成 <span style="color:…">-37 dBm</span>。颜色改走类名。
+		function formatRssi(rssi) {
+			var rssiNum = parseInt(rssi, 10);
+			if (isNaN(rssiNum) || rssiNum === 0) return '--';
+			return rssiNum + ' dBm';
+		}
+
+		function rssiTone(rssi) {
+			var n = parseInt(rssi, 10);
+			if (isNaN(n) || n === 0) return '';
+			if (n >= -60) return 'rssi-good';
+			if (n >= -75) return 'rssi-fair';
+			return 'rssi-bad';
+		}
+
+		// 首屏渲染与增量刷新共用：文本 + 强弱色一起改
+		function paintRssi(el, rssi) {
+			if (!el) return;
+			var text = formatRssi(rssi);
+			if (el.textContent !== text) el.textContent = text;
+			var tone = rssiTone(rssi);
+			if (String(el.getAttribute('data-tone') || '') === tone) return;
+			el.setAttribute('data-tone', tone);
+			var keep = [];
+			var parts = String(el.className || '').split(/\s+/);
+			for (var i = 0; i < parts.length; i++) {
+				if (parts[i] && parts[i].indexOf('rssi-') !== 0) keep.push(parts[i]);
+			}
+			if (tone) keep.push(tone);
+			el.className = keep.join(' ');
 		}
 
 		function truncateDeviceName(str, maxLen) {
@@ -932,7 +1046,7 @@
 			];
 
 			// 未识别出 OUI 的设备不再用彩色：与有 logo 的头像统一成黑白灰，
-			// 描边/字母用深灰，暗色模式由 tune.css 反相。
+			// 描边/字母用深灰，暗色模式由上面的样式反相。
 			var DEVICE_COLORS = ['#f1f5f9', '#e5e7eb', '#e2e8f0', '#d1d5db'];
 
 			function deviceVendorColor(vendor) {
@@ -1029,7 +1143,7 @@
 				var letterStyle = { background: color, color: '#fff', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' };
 				if (appId) {
 					var $img = $('<img>').addClass('user-app-icon-img')
-						.attr({ src: '<%=resource%>/oaf/app_icons/' + encodeURIComponent(appId) + '.png', alt: appName })
+						.attr({ src: '<%=resource%>/oaf_status/app_icons/' + encodeURIComponent(appId) + '.png', alt: appName })
 						.css({ width:'100%', height:'100%', borderRadius:'5px', display:'block', objectFit:'cover' });
 					$img.on('error', function () {
 						$(this).remove();
@@ -1069,6 +1183,66 @@
 				return result;
 			}
 
+			function formatWeekdayList(weekdays) {
+				const dayMap = ['<%:Sun%>', '<%:Mon%>', '<%:Tue%>', '<%:Wed%>', '<%:Thu%>', '<%:Fri%>', '<%:Sat%>'];
+				if (!Array.isArray(weekdays) || weekdays.length === 0) {
+					return '--';
+				}
+				return weekdays.map(function(wd) {
+					var idx = parseInt(wd, 10);
+					if (isNaN(idx) || idx < 0 || idx > 6) return '';
+					return dayMap[idx];
+				}).filter(Boolean).join(',');
+			}
+
+			function formatTimeRuleText(rule) {
+				if (!rule) return '--';
+				var weekdays = formatWeekdayList(rule.weekdays);
+				if (rule.start_time && rule.end_time) {
+					return weekdays + ' ' + rule.start_time + '-' + rule.end_time;
+				}
+				if (rule.duration_minutes) {
+					return weekdays + ' <%:Daily Duration%> ' + rule.duration_minutes + 'm';
+				}
+				if (rule.flow_mb) {
+					return weekdays + ' <%:Daily Flow%> ' + rule.flow_mb + ' MB';
+				}
+				return weekdays;
+			}
+
+			function getModeText(mode) {
+				return parseInt(mode, 10) === 1 ? '<%:All Users%>' : '<%:Selected User%>';
+			}
+
+			function formatRuleTimeText(rule) {
+				var timeList = [];
+				if (Array.isArray(rule.time_rules)) {
+					timeList = rule.time_rules.map(formatTimeRuleText);
+				} else if (Array.isArray(rule.duration_rules)) {
+					timeList = rule.duration_rules.map(formatTimeRuleText);
+				} else if (Array.isArray(rule.flow_rules)) {
+					timeList = rule.flow_rules.map(formatTimeRuleText);
+				}
+				return timeList.length > 0 ? timeList.join('<br/>') : '--';
+			}
+
+			function formatAppCategoryStats(rule) {
+				var stats = Array.isArray(rule.category_stats) ? rule.category_stats : [];
+				if (stats.length === 0) {
+					return '--';
+				}
+				return stats.map(function(item) {
+					var classId = parseInt(item && item.id, 10);
+					var count = parseInt(item && item.count, 10) || 0;
+					if (isNaN(classId) || classId <= 0) return '';
+					var className = app_class_name_map[classId] || ('Class-' + classId);
+					return escapeHtml(className) + '(' + count + ')';
+				}).filter(Boolean).join(', ');
+			}
+
+
+
+
 		function render_user_list(data) {
 			const $tb = $('#user_status_table');
 			const $cards = $('#user_status_cards');
@@ -1105,8 +1279,6 @@
 						</div>
 					</td>`);
 					$tr.append(`<td class="td user-col-ip">${escapeHtml(displayIPv4(user_list[i].ip))}</td>`);
-					// 连接数：flows 已经是 v4+v6 合计，单值显示，1 秒快通道就地刷新
-					$tr.append('<td class="td user-col-flows" data-live="flows">' + flowsHtml + '</td>');
 					// IPv6 地址本身不显示：一台设备通常同时挂着多个临时地址还会轮换，
 					// 这一列只留 IPv4 租约读起来更干净。速率/流量仍按 v4、v6 拆开。
 					var ip6 = user_list[i].ip6 || '';
@@ -1124,8 +1296,7 @@
 					// 离线设备没有连接，显示 --（与在线状态一致）
 					var flowsNum = parseInt(user_list[i].flows, 10);
 					var flowsText = (parseInt(user_list[i].online, 10) === 1 && !isNaN(flowsNum)) ? String(flowsNum) : '--';
-					// flows 已经是 IPv4 + IPv6 的合计条数，不再单独标出 V6 的数量
-					var flowsHtml = flowsText;
+					$tr.append('<td class="td user-col-flows" data-live="flows">' + flowsText + '</td>');
 					// 接口给的是 v4+v6 合计，上排用 合计 - v6 还原 v4
 					var upRate4 = hasV6 ? Math.max(0, upRateVal - upRate6) : upRateVal;
 					var downRate4 = hasV6 ? Math.max(0, downRateVal - downRate6) : downRateVal;
@@ -1146,6 +1317,14 @@
 					}
 					downRateHtml += '</div>';
 					$tr.append('<td class="td user-col-down-rate">' + downRateHtml + '</td>');
+					if (user_session_enable) {
+						var sessionDisplay = '--';
+						if (parseInt(user_list[i].online, 10) === 1) {
+							var sessionNum = parseInt(user_list[i].session, 10);
+							sessionDisplay = isNaN(sessionNum) ? '0' : String(sessionNum);
+						}
+						$tr.append('<td class="td user-col-sessions" data-live="sessions">' + sessionDisplay + '</td>');
+					}
 					var todayUpBytes = user_list[i].today_up_bytes || 0;
 					var todayDownBytes = user_list[i].today_down_bytes || 0;
 					var totalTraffic = todayUpBytes + todayDownBytes;
@@ -1166,6 +1345,11 @@
 					$tr.append('<td class="td user-col-traffic">' + trafficHtml + '</td>');
 					var todayActiveTimeStr = get_display_time(user_list[i].today_active_time || 0);
 					$tr.append('<td class="td user-col-net-time" data-live="nettime">' + todayActiveTimeStr + '</td>');
+					if (user_rssi_enable) {
+						var $rssiTd = $('<td class="td user-col-signal"><span class="rssi-val" data-live="rssi"></span></td>');
+						paintRssi($rssiTd.find('[data-live="rssi"]')[0], user_list[i].rssi);
+						$tr.append($rssiTd);
+					}
 					var $appsTd = $('<td class="td user-col-apps" data-live="apps">')
 						.attr('data-appsig', appSlotSignature(user_list[i]));
 					var applist = Array.isArray(user_list[i].applist) ? user_list[i].applist : [];
@@ -1179,6 +1363,12 @@
 						displayApplist.forEach(function(app) { $appsTd.append(buildAppIconEl(app, app.current)); });
 					}
 					$tr.append($appsTd);
+						var current_url = isOnline ? (user_list[i].url || "--") : "--";
+						var display_url = current_url;
+						if (current_url !== "--" && current_url.length > 20) {
+							display_url = current_url.substring(0, 20) + "...";
+						}
+						$tr.append(`<td class="td user-col-url" data-live="url"><span title="${current_url}">${display_url}</span></td>`);
 						var statusHtml = '<span class="user-status-label offline"><%:Offline%></span>';
 						if (user_list[i].online == 1) {
 							if (user_list[i].active == 1) {
@@ -1204,6 +1394,20 @@
 						}
 					}
 					var ipText = displayIPv4(user_list[i].ip);
+					var currentUrlText = current_url || '--';
+					var sessionInfo = '';
+					if (user_session_enable) {
+						var sessionNumCard = parseInt(user_list[i].session, 10);
+						var sessionDisplayCard = parseInt(user_list[i].online, 10) === 1 ? (isNaN(sessionNumCard) ? '0' : String(sessionNumCard)) : '--';
+						sessionInfo = '<div class="user-card-line"><span class="user-card-label"><%:Session Count%></span><span class="user-card-value" data-live="sessions">' + sessionDisplayCard + '</span></div>';
+					}
+					var rssiInfo = '';
+					if (user_rssi_enable) {
+						var rssiToneCls = rssiTone(user_list[i].rssi);
+						rssiInfo = '<div class="user-card-line"><span class="user-card-label"><%:Signal%></span>'
+							+ '<span class="user-card-value rssi-val' + (rssiToneCls ? ' ' + rssiToneCls : '') + '" data-live="rssi">'
+							+ formatRssi(user_list[i].rssi) + '</span></div>';
+					}
 					var cardTrafficHtml = '<span class="user-card-flow user-card-flow4" data-live="flow4">' + formatTraffic(totalTraffic - traffic6) + '</span>';
 					if (hasV6) {
 						cardTrafficHtml += '<span class="user-card-flow user-card-flow6"><span class="v6-chip">V6</span><span class="v6-val" data-live="flow6">' + formatTraffic(traffic6) + '</span></span>';
@@ -1214,7 +1418,6 @@
 					}
 					var cardFlowsNum = parseInt(user_list[i].flows, 10);
 					var cardFlowsText = (parseInt(user_list[i].online, 10) === 1 && !isNaN(cardFlowsNum)) ? String(cardFlowsNum) : '--';
-					var cardFlowsHtml = cardFlowsText;
 					var $card = $(`
 						<div class="user-card" data-mac="${String(mac || '').toUpperCase()}">
 							<div class="user-card-head">
@@ -1229,10 +1432,13 @@
 							</div>
 							<div class="user-card-body">
 								<div class="user-card-line"><span class="user-card-label" title="<%:Today Traffic%>"><%:Internet Traffic%></span><span class="user-card-value user-card-stack">${cardTrafficHtml}</span></div>
-								<div class="user-card-line"><span class="user-card-label" title="今日上网时长：有活动连接的时长（一个采样窗口内流量不足 2KB 的长连接不计时）"><%:Internet Duration%></span><span class="user-card-value" data-live="nettime">${todayActiveTimeStr}</span></div>
-								<div class="user-card-line"><span class="user-card-label" title="连接数：IPv4 + IPv6 的合计数">连接数</span><span class="user-card-value" data-live="flows">${cardFlowsHtml}</span></div>
+								<div class="user-card-line"><span class="user-card-label" title="<%:Today Internet Duration%>"><%:Internet Duration%></span><span class="user-card-value" data-live="nettime">${todayActiveTimeStr}</span></div>
+								<div class="user-card-line"><span class="user-card-label" title="连接数：IPv4 + IPv6 的合计数">连接数</span><span class="user-card-value" data-live="flows">${cardFlowsText}</span></div>
 								<div class="user-card-line"><span class="user-card-label"><%:Rate%></span><span class="user-card-value user-card-stack">${cardRateHtml}</span></div>
+								${sessionInfo}
+								${rssiInfo}
 								<div class="user-card-line user-card-apps"><span class="user-card-label"><%:Common App%></span><span class="user-card-value user-card-apps-icons" data-live="apps"></span></div>
+								<div class="user-card-line"><span class="user-card-label"><%:Visiting URL%></span><span class="user-card-value user-card-url" data-live="url" title="${escapeHtml(currentUrlText)}">${escapeHtml(currentUrlText)}</span></div>
 							</div>
 							<div class="user-card-actions">
 								<button type="button" class="cbi-button cbi-button-add" onclick="window.location.href='<%=url("admin/status/oaf_users/detail")%>?mac=' + encodeURIComponent('${user_list[i].mac}')"><%:Detail%></button>
@@ -1334,7 +1540,7 @@
 					(function(app) {
 						var vName = app.name || '';
 						var vId = String(app.id || '');
-						var vSrc = vId ? '<%=resource%>/oaf/app_icons/' + encodeURIComponent(vId) + '.png' : '';
+						var vSrc = vId ? '<%=resource%>/oaf_status/app_icons/' + encodeURIComponent(vId) + '.png' : '';
 						var vIconDisabled = app && (app.icon === 0 || app.icon === '0' || app.hasIcon === false);
 						if (vId && vIconDisabled) {
 							_iconStatusCache[vId] = 'failed';
@@ -1493,20 +1699,6 @@
         return total_time_str;
     }
 
-    // 兜底桶不进饼图：appid=0（特征库一个窗口都没命中）和 appid>0 但名字表
-    // 里没登记，对用户都是「认不出这个应用」。画出来就是一个盖住所有的灰饼，
-    // 反而把真正认出来的应用挤没了。这部分在详情页「应用流量」表里仍有单独一行。
-    var UNKNOWN_APP_NAME = '未识别';
-    var APP_EMPTY_TEXT = '暂无已识别应用';
-
-    function is_unknown_app_item(it) {
-        var id = Number(it.id || it.appid);
-        if (!id) return true;
-        var n = String(it.name || '').replace(/^\s+|\s+$/g, '');
-        return n === '' || n === '--' || n === 'Unknown' || n === 'Unknown App'
-            || n === UNKNOWN_APP_NAME || n === '未知应用';
-    }
-
     function display_app_visit_view(data) {
         var $chartElement = $('#app_time_chart');
         if ($chartElement.length === 0) {
@@ -1526,14 +1718,15 @@
         }
 		var total_time = 0
 		var app_stat_array = new Array();
-		// 0 值的占位项会被 ECharts 画成一整圈满环（像"某个应用占 100%"），
-		// 空态改用圆心文字说明，series 保持空数组。
 		if (data.length == 0){
-			// 没有可用会话：什么都不画
+			var app_obj ={}
+			app_obj.name = "<%:Unknown App%>"
+			app_obj.value = 0
+			app_obj.legendname = app_obj.name
+			app_stat_array.push(app_obj)
 		}
 		else{
 			for (var i = 0; i < data.length; i++) {
-				if (is_unknown_app_item(data[i])) continue;
 				var app_obj = {};
 				app_obj.value = data[i].t;
 				app_obj.legendname = data[i].name;
@@ -1544,7 +1737,7 @@
 			}
 		}
 		console.log("hello")
-        var total_time_str = app_stat_array.length ? get_display_time(total_time) : APP_EMPTY_TEXT;
+        var total_time_str = get_display_time(total_time);
         
         var palette = [
             '#34d399',  // emerald-400 
@@ -1688,15 +1881,24 @@
 				<th class="th user-col-down-rate">
 					<%:Down Rate%>
 				</th>
+				<th class="th user-col-sessions" id="session_count_header" data-col-off="1">
+					<%:Sessions%>
+				</th>
 					<th class="th user-col-traffic" title="<%:Today Traffic%>">
 						<%:Net Traffic%>
 					</th>
-					<th class="th user-col-net-time" title="今日上网时长：有活动连接的时长（一个采样窗口内流量不足 2KB 的长连接不计时）">
+					<th class="th user-col-net-time" title="<%:Today Internet Duration%>">
 						<%:Net Time%>
 					</th>
+				<th class="th user-col-signal" id="rssi_header" data-col-off="1">
+					<%:Signal%>
+				</th>
 				<th class="th user-col-apps">
 					<%:Apps%>
 				</th>
+					<th class="th user-col-url">
+						<%:URL%>
+					</th>
 					<th class="th user-col-status">
 						<%:Status%>
 					</th>
@@ -1791,6 +1993,20 @@
 	</div>
 </div>
 <style>
+	/* 设备头像：和 1.1 一致的白底黑标；认不出 OUI 的随机 MAC 也不再用彩色底 */
+	.user-device-icon.user-device-icon-vendor {
+		background: #ffffff !important;
+		color: #334155 !important;
+		border: 1px solid rgba(15, 23, 42, 0.14) !important;
+	}
+	.user-device-icon.user-device-icon-vendor svg { color: inherit; }
+	.user-device-logo { background: #fff !important; }
+	[data-darkmode="true"] .user-device-icon.user-device-icon-vendor {
+		background: #2b3038 !important;
+		color: #e5e7eb !important;
+		border-color: rgba(255, 255, 255, 0.18) !important;
+	}
+	[data-darkmode="true"] .user-device-logo { filter: invert(1) grayscale(1); }
 	.user-status-content .cbi-tblsection {
 		margin-top: 0;
 		padding-top: 0;
@@ -1999,6 +2215,8 @@
 	#user_status_table .user-col-up-rate { min-width: 90px; width: 7%; }
 	#user_status_table .user-col-down-rate { min-width: 90px; width: 7%; }
 	#user_status_table .user-col-flows { min-width: 72px; width: 5%; text-align: center !important; }
+	#user_status_table .user-col-signal { min-width: 88px; width: 6%; }
+	#user_status_table .user-col-sessions { min-width: 88px; width: 6%; }
 	#user_status_table .user-col-traffic { min-width: 100px; width: 7%; }
 	#user_status_table .user-col-net-time { min-width: 100px; width: 7%; }
 	/* 流量与时长两列原本只隔 ~40px，比其他列挤，这里补点呼吸空间 */
@@ -2010,6 +2228,7 @@
 		min-width: 150px;
 	}
 	#user_status_table .user-col-apps { min-width: 125px; width: 10%; }
+	#user_status_table .user-col-url { min-width: 145px; width: 11%; }
 	#user_status_table .user-col-status { min-width: 72px; width: 5%; }
 	#user_status_table .user-col-actions { min-width: 96px; width: 7%; }
 	/* 操作列贴最右：表头和数据格一起右对齐，按钮离右边框只剩内边距 */
@@ -2300,6 +2519,14 @@
 		color: var(--text-color-medium, #9ca3af);
 	}
 
+	.user-card-url {
+		max-width: 220px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		display: inline-block;
+	}
+
 	.user-card-actions {
 		display: flex;
 		justify-content: flex-end;
@@ -2361,6 +2588,12 @@
 		}
 		.user-card-grid > .user-card-row:last-child > .user-card:last-child {
 			margin-bottom: 0 !important;
+		}
+
+		/* 访问 URL 经常是长串，窄屏要允许折行，不能横向顶出去 */
+		.user-card-url {
+			word-break: break-all;
+			white-space: normal !important;
 		}
 
 		/* 常用 APP 图标多了就横向滚，不要把卡片撑破 */
@@ -2435,6 +2668,9 @@
 			padding: 12px;
 		}
 
+		.user-card-url {
+			max-width: 100%;
+		}
 	}
 
 	@media (max-width: 480px) {
@@ -2617,6 +2853,9 @@
 [data-darkmode="true"] .user-card-value {
 	color: #e3e5e8;
 }
+[data-darkmode="true"] .user-card-url {
+	color: #8ab4f8;
+}
 [data-darkmode="true"] .user-card-up {
 	color: #6aa9ff;
 }
@@ -2770,14 +3009,25 @@
 	overflow-anchor: none;
 }
 
-/* 能力开关控制的列（会话）：表格用 display: table-cell !important
+/* 能力开关控制的列（会话 / 信号）：表格用 display: table-cell !important
    把布局锁死了，这里必须用更高特异性 + !important 才能真正藏掉，
    否则表头比数据行多一格，从该列起整行错位一格。 */
+#user_status_table .th[data-col-off="1"],
+#user_status_table .td[data-col-off="1"] {
+	display: none !important;
+}
 
+/* 信号强弱色（原来由 formatRssi 拼内联 <span style>，文本通道会露出标签） */
+#user_status_table .rssi-good,
+.user-card .rssi-good { color: #22c55e; }
+#user_status_table .rssi-fair,
+.user-card .rssi-fair { color: #f59e0b; }
+#user_status_table .rssi-bad,
+.user-card .rssi-bad { color: #ef4444; }
 
 /* ---------------------------------------------------------------- 表头整行居中
    之前只有速率 / 流量 / 连接数 / 操作这几列表头是居中的，上网时长 /
-   应用 / URL / 状态还是左对齐，一整行标题有齐有散。
+   信号强度 / 应用 / URL / 状态还是左对齐，一整行标题有齐有散。
    现在按单元格中线居中；同时把表头左右内边距拉平——「上网时长」原来
    42px 的左内边距会把居中后的文字推到列中心右侧 20px，「上网流量」的
    14px 右内边距同理。终端 / IP / 应用 / URL 四列是长文本，单独回到左对齐
@@ -2793,6 +3043,7 @@
    42px 的左内边距是给左对齐时代留的间距，居中后会把值推到中线右边，
    这里一并拉平。 */
 #user_status_table tr.tr > td.td.user-col-net-time,
+#user_status_table tr.tr > td.td.user-col-signal,
 #user_status_table tr.tr > td.td.user-col-status {
 	text-align: center !important;
 	vertical-align: middle !important;
@@ -2810,9 +3061,11 @@
 #user_status_table tr:first-child > th.th.user-col-device,
 #user_status_table tr:first-child > th.th.user-col-ip,
 #user_status_table tr:first-child > th.th.user-col-apps,
+#user_status_table tr:first-child > th.th.user-col-url,
 #user_status_table tr.tr > td.td.user-col-device,
 #user_status_table tr.tr > td.td.user-col-ip,
-#user_status_table tr.tr > td.td.user-col-apps {
+#user_status_table tr.tr > td.td.user-col-apps,
+#user_status_table tr.tr > td.td.user-col-url {
 	text-align: left !important;
 	padding-left: 10px !important;
 }
@@ -2847,19 +3100,24 @@
 		width: 100% !important;
 		min-width: 0 !important;
 	}
-	#user_status_table .user-col-device { width: 15.5% !important; min-width: 0 !important; }
-	#user_status_table .user-col-ip { width: 12% !important; min-width: 0 !important; }
-	#user_status_table .user-col-flows { width: 7% !important; min-width: 0 !important; }
-	#user_status_table .user-col-up-rate { width: 8% !important; min-width: 0 !important; }
-	#user_status_table .user-col-down-rate { width: 8% !important; min-width: 0 !important; }
-	#user_status_table .user-col-traffic { width: 9% !important; min-width: 0 !important; }
-	#user_status_table .user-col-net-time { width: 8% !important; min-width: 0 !important; }
-	#user_status_table .user-col-apps { width: 13% !important; min-width: 0 !important; }
-	#user_status_table .user-col-status { width: 6.5% !important; min-width: 0 !important; }
+	#user_status_table .user-col-device { width: 14.5% !important; min-width: 0 !important; }
+	#user_status_table .user-col-ip { width: 11% !important; min-width: 0 !important; }
+	#user_status_table .user-col-flows { width: 6% !important; min-width: 0 !important; }
+	#user_status_table .user-col-up-rate { width: 7% !important; min-width: 0 !important; }
+	#user_status_table .user-col-down-rate { width: 7% !important; min-width: 0 !important; }
+	#user_status_table .user-col-sessions { width: 6% !important; min-width: 0 !important; }
+	#user_status_table .user-col-traffic { width: 8% !important; min-width: 0 !important; }
+	#user_status_table .user-col-net-time { width: 7% !important; min-width: 0 !important; }
+	#user_status_table .user-col-signal { width: 7% !important; min-width: 0 !important; }
+	#user_status_table .user-col-apps { width: 11% !important; min-width: 0 !important; }
+	#user_status_table .user-col-url { width: 9.5% !important; min-width: 0 !important; }
+	#user_status_table .user-col-status { width: 6% !important; min-width: 0 !important; }
 	#user_status_table .user-col-actions { width: 6% !important; min-width: 0 !important; }
 	/* 固定布局下列宽由百分比定死，内容超长时省略号收尾（否则会压到邻列上） */
-	#user_status_table td.user-col-ip { overflow: hidden; text-overflow: ellipsis; }
-	#user_status_table td.user-col-ip > * { max-width: 100%; }
+	#user_status_table td.user-col-ip,
+	#user_status_table td.user-col-url { overflow: hidden; text-overflow: ellipsis; }
+	#user_status_table td.user-col-ip > *,
+	#user_status_table td.user-col-url > * { max-width: 100%; }
 	/* 应用列是一排图标，列变窄后允许折行，别顶出去 */
 	#user_status_table td.user-col-apps { white-space: normal !important; }
 	/* 「应用」列固定 10% 后放不下 5 枚 20px 图标（原来靠不换行往 URL 列里压）。

@@ -1,5 +1,4 @@
 <link rel="stylesheet" href="<%=resource%>/oaf_status/css/common.css?v=7.0">
-<link rel="stylesheet" href="<%=resource%>/oaf_status/css/tune.css?v=7.1">
 <% local dsp=require "luci.dispatcher" -%>
 <script type="text/javascript" src="<%=resource%>/oaf_status/jquery-3.7.1.min.js?v=7.0"></script>
 <script type="text/javascript" src="<%=resource%>/oaf_status/oaf_icon.js?v=7.0"></script>
@@ -167,6 +166,10 @@
 		var todayDownBytes = user.today_down_bytes || 0;
 		document.getElementById('basic_info_up_bytes').textContent = formatTraffic(todayUpBytes);
 		document.getElementById('basic_info_down_bytes').textContent = formatTraffic(todayDownBytes);
+		document.getElementById('basic_info_band').textContent = formatWirelessBand(user.band);
+		document.getElementById('basic_info_wifi_ifname').textContent = user.wifi_ifname || '--';
+		document.getElementById('basic_info_tx_rate').textContent = formatWirelessRate(user.tx_rate);
+		document.getElementById('basic_info_rx_rate').textContent = formatWirelessRate(user.rx_rate);
 		
 		var statusElement = document.getElementById('basic_info_status');
 		if (user.online == 1) {
@@ -432,6 +435,8 @@
 
 	function startVisitAutoRefresh() {
 		if (visit_refresh_timer) return;
+		// 访问记录是「今天用过什么」的历史，10 秒刷一次；一次请求要付
+		// LuCI 每进程约 150 ms 的启动成本，10 秒一次等于常驻 1.5% 一个核。
 		visit_refresh_timer = window.setInterval(function () {
 			var tabVisitRecords = document.getElementById('tab-visit-records');
 			if (!tabVisitRecords || !tabVisitRecords.classList.contains('active')) return;
@@ -524,23 +529,13 @@
 			return timeStr;
 		}
 
-		// 「认不出这个应用」只有两种情况：appid=0（特征库一个窗口都没命中）
-		// 和 appid>0 但名字表里没登记。对用户是同一件事，统一叫「未识别」；
-		// 内部编号（App10 / #10）不再出现在界面上。
-		var UNKNOWN_APP_NAME = '未识别';
-		var APP_EMPTY_TEXT = '暂无已识别应用';
-
-		function is_unknown_app(appid, name) {
-			var id = Number(appid);
-			if (!id) return true;
-			var n = $.trim(name || '');
-			return n === '' || n === '--' || n === 'Unknown' || n === 'Unknown App'
-				|| n === UNKNOWN_APP_NAME || n === '未知应用';
-		}
-
 		function get_app_display_name(appid, name) {
-			var displayName = $.trim(name || '');
-			return is_unknown_app(appid, displayName) ? UNKNOWN_APP_NAME : displayName;
+			var id = appid === undefined || appid === null ? "" : String(appid);
+			var displayName = $.trim(name || "");
+			if (!displayName || displayName === "--" || displayName === "Unknown" || displayName === "Unknown App") {
+				return id && id !== "0" ? ("App" + id) : "--";
+			}
+			return displayName;
 		}
 
 		function display_app_visit_view(data) {
@@ -588,17 +583,15 @@
 		
 		var total_time = 0
 		var app_stat_array = new Array();
-		// 一个 0 值的占位项会被 ECharts 画成一整圈满环，看着像"某个应用占了
-		// 100%"，比空白更误导。空态交给圆心文字说明，series 保持空数组。
 		if (data.length == 0){
-			// 没有可用会话：什么都不画
+			var app_obj ={}
+			app_obj.name = "<%:Unknown App%>"
+			app_obj.value = 0
+			app_obj.legendname = app_obj.name
+			app_stat_array.push(app_obj)
 		}
 		else{
 				for (var i = 0; i < data.length; i++) {
-					// 兜底桶不进饼图：特征库没认出来的部分常常占 90% 以上，
-					// 画出来就是一个盖住所有的灰饼，反而把真正认出的应用挤没了。
-					// 这部分在下方「应用流量」表里仍有单独一行，不会凭空消失。
-					if (is_unknown_app(data[i].id || data[i].appid, data[i].name)) continue;
 					var app_obj = {};
 					app_obj.value = data[i].t;
 					app_obj.legendname = get_app_display_name(data[i].id || data[i].appid, data[i].name);
@@ -611,10 +604,8 @@
 		var total_time_str = get_display_time(total_time);
 		// 圆心的统计时间写在 DOM 层上（见 .app-time-center），图表只画圆环
 		var centerEl = document.getElementById('app_time_center');
-		var noApp = app_stat_array.length === 0;
 		if (centerEl) {
-			centerEl.textContent = noApp ? APP_EMPTY_TEXT : total_time_str;
-			centerEl.className = 'app-time-center' + (noApp ? ' is-empty' : '');
+			centerEl.textContent = total_time_str;
 		}
 		var option = {
 			backgroundColor: 'transparent',
@@ -647,8 +638,7 @@
 			},
 			// 竖排图例要占右侧四分之一，350px 上饼被挤到边上、图例文字还被裁；
 			// 窄屏改成图下方横排 plain，自动折行，不再翻页
-			// 空态连图例一起收掉：只留一条孤零零的"访问时间"比空白更奇怪
-			legend: noApp ? { show: false } : FWX_NARROW ? {
+			legend: FWX_NARROW ? {
 				type: 'plain',
 				orient: 'horizontal',
 				left: 'center',
@@ -769,19 +759,20 @@
 
 				tr.insertCell(-1).innerHTML = first_time_str;
 				tr.insertCell(-1).innerHTML = latest_time_str;
-				// 时长精确到秒：一次真实访问常常只有十几秒，按分钟取整会显示成
-				// 1m，跟左边「开始 / 结束」两列对不上。小时级不再展开秒。
-				var tt = parseInt(visit_list[i].tt, 10) || 0;
-				var sec = tt % 60, min = Math.floor(tt / 60) % 60, hour = Math.floor(tt / 3600);
+				var hour = parseInt(visit_list[i].tt / 3600);
+				var seconds = visit_list[i].tt % 3600;
+				var min = parseInt(seconds / 60)
 				var total_time_str;
-				if (visit_list[i].act == 1) {
-					total_time_str = "-";
-				} else if (hour > 0) {
-					total_time_str = hour + "h " + min + "m";
-				} else if (min > 0) {
-					total_time_str = min + "m " + sec + "s";
-				} else {
-					total_time_str = sec + "s";
+				if (visit_list[i].act == 1)
+					total_time_str = "-"
+				else {
+					if (hour > 0)
+						total_time_str = hour + "h " + min + "m"
+					else {
+						if (min == 0)
+							min = 1;
+						total_time_str = min + "m"
+					}
 				}
 
 				tr.insertCell(-1).innerHTML = total_time_str;
@@ -1059,7 +1050,7 @@
 					// 认出来的应用压成一条看不见的线。未识别的量在「应用流量」表里
 					// 仍有单独一行，不会丢。
 					var aid = Number(app.appid) || 0;
-					if (!is_unknown_app(aid, app.name)) {
+					if (!appTrafficUnknown(aid, app.name)) {
 						if (!appSeries[aid]) {
 							appSeries[aid] = {
 								name: get_app_display_name(aid, app.name),
@@ -1193,7 +1184,7 @@
 			title: {
 				text: '<%:Today Top Apps Statistics (24 Hours)%>',
 				// 全部落在兜底桶时图里一条系列都没有，给一句说明比空白安全
-				subtext: appIds.length ? '' : APP_EMPTY_TEXT,
+				subtext: appIds.length ? '' : '暂无已识别应用',
 				subtextStyle: {
 					color: textColor,
 					fontSize: 13
@@ -1344,9 +1335,9 @@
 		}
 	}
 
-	// 按应用字节的今日流量。数据来自 conntrack 结算：字节由 PPE 回写，
-	// appid 取自 conntrack mark，所以硬件卸载的长连接也算得全。
-	// 与上方的「应用时长」图是两套口径，不能混算。
+	// 应用流量记录：按应用汇总今日上/下行字节。数据来自 oaf-flowd 的
+	// apps.json（appid 取自 conntrack mark，字节取自 conntrack 计数），
+	// 和上方「应用时长」图是两套口径，不能混算。
 	function loadAppTraffic() {
 		if (!mac) return;
 		new XHR().get("<%=url('admin/status/oaf_users/api/app_traffic')%>?mac=" + encodeURIComponent(mac), null,
@@ -1356,21 +1347,33 @@
 		);
 	}
 
+	// 本机其它图表用 get_app_display_name()，查不到名字时会退回 "App123"。
+	// 流量表按 1.1 的口径统一叫「未识别」，这里单独判定，不改全局函数。
+	function appTrafficUnknown(id, name) {
+		var n = $.trim(name || '');
+		return !Number(id) || n === '' || n === '--' || n === 'Unknown'
+			|| n === 'Unknown App' || n === '未识别' || n === '未知应用';
+	}
+
 	function renderAppTraffic(apps) {
 		var body = document.getElementById('app_traffic_body');
 		var note = document.getElementById('app_traffic_note');
 		if (!body) return;
-		// 同一批「未识别」在数据里会是两行：id=0（采样器一个窗口都没拿到
-		// mark）和 id>0 但名字表里没登记。对用户来说是一件事，这里按归一后
-		// 的名字合并，表格里只留一行，否则就是两条内容一模一样的「未识别」。
+		// id=0（没拿到 mark）和 id>0 但名字表里没登记，对用户是同一件事，
+		// 合并成一行，避免表里出现两条一模一样的「未识别」。
 		var merged = {}, order = [];
 		for (var i = 0; i < apps.length; i++) {
 			var src = apps[i];
 			var id = Number(src.id) || 0;
-			var key = is_unknown_app(id, src.name) ? '' : ('a' + id);
+			var unknown = appTrafficUnknown(id, src.name);
+			var key = unknown ? '' : ('a' + id);
 			var slot = merged[key];
 			if (!slot) {
-				slot = merged[key] = { id: id, name: get_app_display_name(id, src.name), up: 0, down: 0 };
+				slot = merged[key] = {
+					id: id,
+					name: unknown ? '未识别' : $.trim(src.name),
+					up: 0, down: 0
+				};
 				order.push(key);
 			}
 			slot.up += Number(src.up) || 0;
@@ -1378,15 +1381,14 @@
 		}
 		var rows = [];
 		for (var k = 0; k < order.length; k++) rows.push(merged[order[k]]);
+		rows.sort(function (p, q) { return (q.up + q.down) - (p.up + p.down); });
 
-		var total = 0, unknown = 0;
+		var total = 0, unknownBytes = 0;
 		for (var r = 0; r < rows.length; r++) {
 			var b = rows[r].up + rows[r].down;
 			total += b;
-			if (!rows[r].id) unknown += b;
+			if (appTrafficUnknown(rows[r].id, rows[r].name)) unknownBytes += b;
 		}
-		rows.sort(function (p, q) { return (q.up + q.down) - (p.up + p.down); });
-
 		var html = '';
 		for (var j = 0; j < rows.length; j++) {
 			var row = rows[j];
@@ -1398,11 +1400,36 @@
 		body.innerHTML = html || '<tr class="tr"><td class="td" colspan="4">--</td></tr>';
 		if (note) {
 			note.textContent = total > 0
-				? '合计 ' + formatTraffic(total) + '，其中未识别 ' + formatTraffic(unknown)
-				  + '。未识别是官方特征库没有对应规则的连接，'
-				  + '补特征库规则后可归类；本表字节包含 PPE 硬件加速流量。'
+				? '合计 ' + formatTraffic(total) + '，其中未识别 ' + formatTraffic(unknownBytes)
+				  + '。未识别是官方特征库没有对应规则的连接，补特征库规则后可归类；'
+				  + '本表字节包含硬件加速流量。'
 				: '暂无数据（采集器启动后开始累计）。';
 		}
+	}
+
+	function formatWirelessRate(rate) {
+		var rateNum = parseInt(rate, 10);
+		if (isNaN(rateNum) || rateNum <= 0) {
+			return '--';
+		}
+		return (rateNum / 1000).toFixed(1) + ' Mbit/s';
+	}
+
+	function formatWirelessBand(band) {
+		var bandStr = (band || '').toString().toLowerCase();
+		if (!bandStr) {
+			return '--';
+		}
+		if (bandStr === '2g' || bandStr === '2.4g' || bandStr === '2.4ghz') {
+			return '2.4G';
+		}
+		if (bandStr === '5g' || bandStr === '5ghz') {
+			return '5G';
+		}
+		if (bandStr === '6g' || bandStr === '6ghz') {
+			return '6G';
+		}
+		return bandStr.toUpperCase();
 	}
 
 	function escape_html(value) {
@@ -1681,9 +1708,9 @@
 							<td class="td basic-info-filler" colspan="2"></td>
 						</tr>
 						<tr class="tr">
-							<td class="td" style="font-weight: bold;" title="今日上网时长：有活动连接的时长（一个采样窗口内流量不足 2KB 的长连接不计时）"><%:Today Internet Duration%></td>
+							<td class="td" style="font-weight: bold;"><%:Today Internet Duration%></td>
 							<td class="td" id="basic_info_active_time">--</td>
-							<td class="td" style="font-weight: bold;" title="今日在线时长：连接路由器的时长（在 ARP / IPv6 邻居表里即算在网，空闲也算）"><%:Today Online Duration%></td>
+							<td class="td" style="font-weight: bold;"><%:Today Online Duration%></td>
 							<td class="td" id="basic_info_online_time">--</td>
 						</tr>
 						<tr class="tr">
@@ -1691,6 +1718,18 @@
 							<td class="td" id="basic_info_up_bytes">--</td>
 							<td class="td" style="font-weight: bold;"><%:Today Downstream Traffic%></td>
 							<td class="td" id="basic_info_down_bytes">--</td>
+						</tr>
+						<tr class="tr">
+							<td class="td" style="font-weight: bold;"><%:Band%></td>
+							<td class="td" id="basic_info_band">--</td>
+							<td class="td" style="font-weight: bold;"><%:Wireless Interface%></td>
+							<td class="td" id="basic_info_wifi_ifname">--</td>
+						</tr>
+						<tr class="tr">
+							<td class="td" style="font-weight: bold;"><%:Wireless Tx Rate%></td>
+							<td class="td" id="basic_info_tx_rate">--</td>
+							<td class="td" style="font-weight: bold;"><%:Wireless Rx Rate%></td>
+							<td class="td" id="basic_info_rx_rate">--</td>
 						</tr>
 					</table>
 				</div>
@@ -1746,10 +1785,10 @@
 					     应用名会互相压住，这里改成自己排、可换行 -->
 					<div id="hourly_apps_legend" class="app-legend"></div>
 				</div>
-				<!-- 按应用字节的今日流量。上方的图是「应用时长」，这里是不可混算
-				     的另一套口径：字节来自 conntrack 计数，PPE 硬件卸载后仍会回写。 -->
+				<!-- 应用流量记录：按应用字节统计今日流量，与上方的「应用时长」
+				     图是两套口径；字节取自 conntrack，硬件卸载后仍会回写。 -->
 				<div class="app-traffic-panel" style="margin-top:18px;">
-					<div style="font-weight:bold;margin-bottom:8px;">按应用统计的今日流量（含硬件加速）</div>
+					<div style="font-weight:bold;margin-bottom:8px;">应用流量记录 · 按应用统计的今日流量（含硬件加速）</div>
 					<table class="table cbi-section-table" id="app_traffic_table">
 						<tr class="tr table-titles">
 							<th class="th">应用</th>
@@ -1765,7 +1804,7 @@
 
 			
 			<div id="tab-visit-records" class="tab-body">
-				<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 8px 2px;">只列已识别应用且真正传过数据的访问：一次采样窗口（1–2 秒）内流量不足 2 KiB 的挂机心跳不计，QQ、输入法、推送通道这类「一直在线但没动」的连接不会出现；特征库还认不出的应用也不列。时长精确到秒，重启后重新累计。</div>
+				<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 8px 2px;">与「今日常用 APP」同源：只列今日已识别、且有效时段内流量达到 2 KB 的应用访问（apps.json 的活跃秒数 + 分小时字节）；挂机心跳和未识别应用不列，重启后重新累计。</div>
 				<div class="visit-scroll" style="max-height: 1000px; overflow-y: auto;padding-right: 20px;">
 					<table class="table cbi-section-table" id="visit_list_table">
 						<tr class="tr table-titles">
@@ -1918,13 +1957,6 @@
 		white-space: nowrap;
 		color: var(--text-color-high, #333);
 	}
-
-	/* 空态：不要把「暂无已识别应用」用 15px 粗体塞进圆环 */
-	.app-time-center.is-empty {
-		font-size: 12px;
-		font-weight: 400;
-		opacity: 0.72;
-	}
 	
 /* 基本信息里 IP 那一行只有「标签 + 值」两个单元格，表格却是 4 列，
    右边两列没有 td，行底那条分隔线只画到一半。用一个跨列表格单元把线
@@ -1935,7 +1967,7 @@
 	line-height: 0 !important;
 }
 
-/* 基本信息表格最后一行下面原本叠了两层留白：
+/* 基本信息最后一行「无线发送速率 / 无线接收速率」下面原本叠了两层留白：
    tab-body 的 5px 下内边距 + 外层面板 20px 下内边距，等于凭空多出一行。
    这里把 tab 自己的下内边距清零，再用负外边距把面板底边收回来，只留
    6px 收口。规则只挂在基本信息 Tab 上，切到图表 Tab 时留白不受影响。 */
@@ -1946,8 +1978,8 @@
 
 /* ---------------------------------------------------------------- 基本信息列宽
    表格原本 table-layout:auto，列宽随最长内容浮动：两个标签列被撑到 228px，
-   两个值列一个 295px 一个 550px，长标签看起来比短标签那行占得更宽、
-   值也离标签太远。桌面端把四列锁死：两个标签列
+   两个值列一个 295px 一个 550px，「无线发送速率」这种长标签看起来比
+   「频段」那行占得更宽、值也离标签太远。桌面端把四列锁死：两个标签列
    各 160px、严格等宽，值列平分剩余宽度；最长的 6 字标签约 84px 加
    20px 内边距仍单行显示，42px 行高不变。窄屏的两列网格不受影响。 */
 @media (min-width: 769px) {
