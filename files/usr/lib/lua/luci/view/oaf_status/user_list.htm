@@ -6,6 +6,13 @@
 <script type="text/javascript" src="<%=resource%>/oaf_status/echarts.min.js?v=5.0"></script>
 
 <script type="text/javascript">
+// 应用图标目录由 oaf_icon.js 统一决定（两套固件目录名不同），
+// 这里不再写死路径，避免跨设备复制模板后图标 404。
+function oafAppIconSrc(id) {
+	if (window.OAFIcon && window.OAFIcon.appIconSrc)
+		return window.OAFIcon.appIconSrc('<%=resource%>', id);
+	return '<%=resource%>/oaf/app_icons/' + encodeURIComponent(id) + '.png';
+}
 // 6.1 是 Argon 主题，明暗状态放在 <html data-argon-mode="dark|light">；
 // 这一套 OAF 样式是按 [data-darkmode="true"] 写的（原件跑在 PonWrt 上）。
 // 把主题状态镜像过来，原有的暗色规则就全部对得上了，切换时也同步。
@@ -1143,7 +1150,7 @@
 				var letterStyle = { background: color, color: '#fff', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' };
 				if (appId) {
 					var $img = $('<img>').addClass('user-app-icon-img')
-						.attr({ src: '<%=resource%>/oaf_status/app_icons/' + encodeURIComponent(appId) + '.png', alt: appName })
+						.attr({ src: oafAppIconSrc(appId), alt: appName })
 						.css({ width:'100%', height:'100%', borderRadius:'5px', display:'block', objectFit:'cover' });
 					$img.on('error', function () {
 						$(this).remove();
@@ -1540,7 +1547,7 @@
 					(function(app) {
 						var vName = app.name || '';
 						var vId = String(app.id || '');
-						var vSrc = vId ? '<%=resource%>/oaf_status/app_icons/' + encodeURIComponent(vId) + '.png' : '';
+						var vSrc = vId ? oafAppIconSrc(vId) : '';
 						var vIconDisabled = app && (app.icon === 0 || app.icon === '0' || app.hasIcon === false);
 						if (vId && vIconDisabled) {
 							_iconStatusCache[vId] = 'failed';
