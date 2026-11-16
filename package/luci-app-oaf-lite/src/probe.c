@@ -498,7 +498,11 @@ void probe_write_hosts(const char *dir)
  *   3-26  IPv4 section (X = ihl for tcp[i])     48     accept
  *                                               49     drop
  */
-int probe_init(const char *ifname)
+static unsigned bound_idx;      /* ifindex we are bound to, 0 = not attached */
+static time_t last_retry;       /* throttle for probe_retry() */
+static time_t last_idx_chk;
+
+static int probe_open(const char *ifname, int quiet)
 {
     struct sock_filter code[] = {
         /* ethertype */
@@ -572,10 +576,15 @@ int probe_init(const char *ifname)
     if (!ifn || !*ifn) ifn = "br-lan";
     idx = (int)if_nametoindex(ifn);
     if (idx == 0) {
-        ol_log("probe: interface %s not found, packet sampling disabled", ifn);
+        /* br-lan is created by netifd and oaf-lite can win that race; the
+         * caller retries, so only the first miss is worth a log line. */
+        if (!quiet)
+            ol_log("probe: interface %s not ready, will retry every 5s "
+                   "(packet sampling off until then)", ifn);
         return -1;
     }
-    strncpy(G.lan_if, ifn, sizeof(G.lan_if) - 1);
+    if (strncmp(G.lan_if, ifn, sizeof(G.lan_if) - 1) != 0)
+        strncpy(G.lan_if, ifn, sizeof(G.lan_if) - 1);
     pfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (pfd < 0) { ol_log("probe: socket: %s", strerror(errno)); return -1; }
     if (setsockopt(pfd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0) {
@@ -605,9 +614,34 @@ int probe_init(const char *ifname)
     }
     flags = fcntl(pfd, F_GETFL, 0);
     fcntl(pfd, F_SETFL, flags | O_NONBLOCK);
-    ol_log("probe: AF_PACKET on %s, snaplen 512, rcvbuf %d KB, burst %d",
-           ifn, got_buf / 1024, OL_MAX_PKT_ROUND);
+    bound_idx = (unsigned)idx;
+    if (!quiet)
+        ol_log("probe: AF_PACKET on %s, snaplen 512, rcvbuf %d KB, burst %d",
+               ifn, got_buf / 1024, OL_MAX_PKT_ROUND);
     return 0;
+}
+
+int probe_init(const char *ifname) { return probe_open(ifname, 0); }
+
+/* Called every round: attaches as soon as br-lan exists, and re-attaches when
+ * netifd rebuilds the bridge under us (same name, new ifindex -- the bound
+ * socket keeps working but silently captures nothing). */
+void probe_retry(void)
+{
+    time_t now = time(NULL);
+
+    if (pfd >= 0) {
+        if (now - last_idx_chk < 30) return;
+        last_idx_chk = now;
+        if (if_nametoindex(G.lan_if) == bound_idx) return;
+        ol_log("probe: %s index changed (was %u), reattaching", G.lan_if, bound_idx);
+        probe_close();
+    }
+    if (now - last_retry < 5) return;
+    last_retry = now;
+    if (probe_open(G.lan_if, 1) == 0)
+        ol_log("probe: attached to %s (%lds after start)", G.lan_if,
+               (long)(now - G.boot_ts));
 }
 
 void probe_close(void)
@@ -618,6 +652,7 @@ void probe_close(void)
 int probe_poll(int budget)
 {
     int n = 0;
+    probe_retry();                       /* cheap no-op once attached */
     if (pfd < 0) return 0;
     while (n < budget) {
         ssize_t got = recv(pfd, pktbuf, sizeof(pktbuf), 0);

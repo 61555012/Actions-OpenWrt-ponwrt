@@ -1584,6 +1584,7 @@ static void write_unknown_flows(void)
         const flow_t *fl = &G.flows[i];
         uint64_t bytes;
         if (fl->used != 1 || fl->appid != 0) continue;
+        if (!fl->remote[0] || !fl->mac[0]) continue;  /* 基线空壳，不是真流 */
         bytes = fl->base_up + fl->base_down;
         if (bytes < 100000) continue;               /* 小流不占版面 */
         /* 维护一个固定大小的 top-N（N=24），避免额外分配 */
@@ -1701,14 +1702,17 @@ void acct_roll_day(const char *newday)
  * 没有基线只能全量记账 —— 一条挂了几个小时的隧道/网盘/视频连接，一次就能
  * 把 5.3 GB 记成「今天刚下的」。
  *
- * 这里在进入主循环前扫一遍 conntrack，给每条已存在的流预置基线。key 是按
- * 「哪一侧是 LAN 客户端」拼的，启动时还不知道方向，所以两个方向都置。
+ * 这里在进入主循环前扫一遍 conntrack，给每条已存在的流预置基线。key 按
+ * 「哪一侧是 LAN 客户端」拼，和 ct_settle 完全同一判据 —— 早先两个方向都置，
+ * 结果反向 key 建出一条永远等不到 settle 的空壳流（ct_settle 只用客户端侧
+ * key），它带着基线字节数留在表里，还以 {"mac":"","remote":""} 的形式污染
+ * unknown_flows.json。
  */
 void acct_seed_baseline(void)
 {
     FILE *f;
     char line[CT_LINE_MAX];
-    char k1[OL_MAX_KEY], k2[OL_MAX_KEY];
+    char key[OL_MAX_KEY];
     int rows = 0, seeded = 0;
     if (!G.flows) return;
     f = fopen("/proc/net/nf_conntrack", "r");
@@ -1716,27 +1720,45 @@ void acct_seed_baseline(void)
     while (fgets(line, sizeof(line), f)) {
         ct_rec_t o;
         flow_t *fl;
+        const char *m1, *m2, *mac, *remote;
+        unsigned lport, rport;
+        uint64_t up, down;
         if (++rows > 20000) break;          /* 防御：异常大的表不阻塞启动 */
         if (!parse_ct_line(line, &o)) continue;
         if (!o.s1[0] || !o.s2[0]) continue;
-        snprintf(k1, sizeof(k1), "%s|%s|%u|%u|%d",
-                 o.s1, o.d1, o.p1, o.p2, o.ipproto);
-        snprintf(k2, sizeof(k2), "%s|%s|%u|%u|%d",
-                 o.s2, o.d2, o.p2, o.p1, o.ipproto);
-        fl = flow_find(k1, 1);
-        if (fl) {
-            fl->base_up = o.b1; fl->base_down = o.b2;
-            fl->has_base = 1; fl->born = G.now;
-            seeded++;
+        m1 = acct_mac_for_ip(o.s1);
+        m2 = (m1 && *m1) ? NULL : acct_mac_for_ip(o.s2);
+        if (m1 && *m1) {
+            mac = m1; remote = o.d1; lport = o.p1; rport = o.p2;
+            up = o.b1; down = o.b2;
+            snprintf(key, sizeof(key), "%s|%s|%u|%u|%d",
+                     o.s1, o.d1, lport, rport, o.ipproto);
+        } else if (m2 && *m2) {
+            mac = m2; remote = o.s1; lport = o.p2; rport = o.p1;
+            up = o.b2; down = o.b1;
+            snprintf(key, sizeof(key), "%s|%s|%u|%u|%d",
+                     o.s2, o.s1, lport, rport, o.ipproto);
+        } else {
+            continue;                       /* 不是本机 LAN 客户端 */
         }
-        if (strcmp(k1, k2) != 0) {
-            fl = flow_find(k2, 1);
-            if (fl) {
-                fl->base_up = o.b2; fl->base_down = o.b1;
-                fl->has_base = 1; fl->born = G.now;
-                seeded++;
-            }
+        fl = flow_find(key, 1);
+        if (!fl) continue;
+        /* 同一连接的两个 conntrack 方向会落到同一个 key 上。取较大的累计值，
+         * 避免「先到的那条是 0」把基线冲掉。 */
+        if (fl->has_base && up + down <= fl->base_up + fl->base_down) continue;
+        fl->base_up = up; fl->base_down = down;
+        fl->has_base = 1; fl->born = G.now;
+        fl->fam = strchr(o.s1, ':') ? 6 : 4;
+        fl->ipproto = o.ipproto;
+        if (!fl->mac[0]) {
+            strncpy(fl->mac, mac, 17);
+            fl->mac[17] = '\0';
         }
+        if (!fl->remote[0]) {
+            strncpy(fl->remote, remote, sizeof(fl->remote) - 1);
+            fl->remote[sizeof(fl->remote) - 1] = '\0';
+        }
+        seeded++;
     }
     fclose(f);
     ol_log("acct: seeded %d baselines from %d conntrack rows", seeded, rows);
