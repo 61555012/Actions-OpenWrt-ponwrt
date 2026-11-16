@@ -603,14 +603,18 @@
 	}
 
 		function get_display_time(seconds) {
+			// 精确到秒，与访问记录 Duration 列（formatDuration）同一口径：
+			// 原先只到分钟，APP 统计里 3528s 显示成 58m，和访问记录里逐段
+			// 显示的秒数对不上。现在 h/m/s 都保留，秒数不再被丢弃。
+			seconds = Math.floor(Number(seconds) || 0);
+			if (seconds <= 0) return '0s';
 			var hours = Math.floor(seconds / 3600);
 			var minutes = Math.floor((seconds % 3600) / 60);
-		var timeStr = '';
-		if (hours > 0) {
-			timeStr = hours + 'h' + (minutes > 0 ? ' ' + minutes + 'm' : '');
-		} else {
-			timeStr = minutes + 'm';
-			}
+			var secs = seconds % 60;
+			var timeStr = '';
+			if (hours > 0) timeStr += hours + 'h';
+			if (minutes > 0) timeStr += (timeStr ? ' ' : '') + minutes + 'm';
+			if (secs > 0 || timeStr === '') timeStr += (timeStr ? ' ' : '') + secs + 's';
 			return timeStr;
 		}
 
@@ -1852,9 +1856,14 @@
 		border: 1px solid var(--border-color-low, #e5e7eb);
 		border-radius: 12px;
 		padding: 10px;
+		/* 与右侧信息栏等高拉伸（align-items:stretch）。让卡片自身做纵向
+		   flex、图表 flex:1 填满，右侧「其他构成」较长时不会再在柱子下方
+		   留出一大块空白。 */
+		display: flex;
+		flex-direction: column;
 	}
-	/* 「今日流量」页现在只有这一张柱状图，适当加高让 24 根协议柱更清楚 */
-	#proto_chart { width: 100%; height: 420px; }
+	/* 图表跟着卡片高度走；420px 只是单行布局时的基准高度 */
+	#proto_chart { width: 100%; flex: 1 1 420px; min-height: 300px; }
 	.proto-side { flex: 1 1 260px; min-width: 230px; display: flex; flex-direction: column; gap: 12px; }
 	.proto-card {
 		background: rgba(128,128,128,.04);
@@ -2489,7 +2498,7 @@
 		.proto-sum-value { font-size: 19px; }
 		.proto-layout { flex-direction: column; }
 		.proto-chart-card, .proto-side { flex: 1 1 auto; width: 100%; min-width: 0; }
-		#proto_chart { height: 300px; }
+		#proto_chart { flex: 0 0 300px; min-height: 0; }
 		/* 手机端图例：名称可省略号，百分比不换行，颜色块固定不收缩，避免颜色块/文字相互重叠 */
 		.proto-legend-row { grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px; }
 		.proto-legend-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

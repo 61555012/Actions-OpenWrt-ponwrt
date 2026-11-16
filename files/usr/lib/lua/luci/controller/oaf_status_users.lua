@@ -773,16 +773,50 @@ override_usage_times = function(list)
 end
 
 -- 应用统计饼图：今天的 APP 活跃使用时长。
--- 挂机的长连接（QQ/微信/输入法的心跳）不算时间：flowd 每轮采样里应用
--- 真的搬了超过心跳阈值的字节才计一轮。数据源 oaf-flowd 1.8.0 的
--- apps.json「a」字段；采样器没有活跃数据（刚重启、旧版本）时退回访问
--- 会话的口径——那是"连接挂着"的时长，数字会明显偏大。
+-- 口径与「访问记录」统一：直接读采样器写下的离散活跃段（active.json 今天
+-- 的那批 {id,ft,lt,tt}），按应用汇总 tt=lt-ft（墙上时间跨度）。这样饼图里
+-- 每个应用的时长，正好等于访问记录里当天该应用各条记录的时长之和，两处
+-- 不再对不上。静默 >120s 切段、<2KiB 心跳不成段的规则也和访问记录一致。
+-- 采样器还没有 active.json（老固件/刚升级）时才退回旧的活跃秒/会话口径。
 function api_dev_visit_time(mac)
 	local target = mac_arg(mac)
 	if target == "" then json_out({}); return end
 
 	local names = load_app_names()
+	local today = lt_date("%Y-%m-%d")
 
+	-- 与访问记录同一份数据源：当天离散活跃段按应用汇总 tt。
+	-- client_active_segments 返回的每段已带 date / tt(=lt-ft) 字段。
+	local sums, seen_today = {}, false
+	if traffic then
+		local ok, segs = pcall(traffic.client_active_segments, target, 30)
+		if ok and type(segs) == "table" then
+			for _, sg in ipairs(segs) do
+				if sg.date == today then
+					seen_today = true
+					local id = tonumber(sg.id) or 0
+					local nm = id > 0 and names[tostring(id)] or nil
+					if id > 0 and nm then
+						local slot = sums[id]
+						if not slot then
+							slot = { id = id, t = 0, name = nm }
+							sums[id] = slot
+						end
+						slot.t = slot.t + (tonumber(sg.tt) or 0)
+					end
+				end
+			end
+		end
+	end
+	if seen_today then
+		local out = {}
+		for _, slot in pairs(sums) do out[#out + 1] = slot end
+		table.sort(out, function(a, b) return a.t > b.t end)
+		json_out(out)
+		return
+	end
+
+	-- 老固件没有 active.json：退回原 apps.json 活跃秒口径
 	local act
 	if traffic then
 		local ok, v = pcall(traffic.client_app_active, target)
@@ -934,91 +968,121 @@ function api_get_hourly_stats(mac)
 	end
 	local names = load_app_names()
 
-	-- 会话按小时切片：拼音/QQ 这类长连接一挂就是几个小时，整段塞进开始
-	-- 小时会出现「一个小时内用了 3H」的怪柱子。按每小时的重叠秒数占比
-	-- 分摊，任何一小时都不超过 3600 秒，各小时之和仍等于饼图/访问记录
-	-- 列表的合计。
+	-- 今日常用 APP 的「每小时应用时长」与访问记录 / APP 统计环图同口径：
+	-- 直接拿采样器写下的当天离散活跃段（active.json），按每段的 ft/lt
+	-- 时间戳切进所属小时，按重叠秒数占比分摊 tt(=lt-ft)。这样柱状图里
+	-- 每个应用、每小时的秒数加起来，正好等于访问记录里该应用当天的时长
+	-- 合计，三处不再各算各的。长连接跨小时也不会整段塞进开始小时。
 	--
-	-- 优先用 flowd 的活跃秒数（1.8.0）：每轮采样里应用真的搬了超过心跳
-	-- 阈值的字节才计一轮，挂机长连接在这里一秒都没有，单小时也永远不会
-	-- 超过 3600。采样器拿不到活跃数据时才退回会话切片。
+	-- 访问记录段不可用时（老固件没有 active.json）才退回原来的口径：
+	-- 先用 apps.json 活跃秒，再退回会话切片。
 	local hourApps = {}  -- [hour][appid] = {appid, icon, name, time}
-	local act
-	if traffic then
-		local ok, v = pcall(traffic.client_app_active, target)
-		if ok then act = v end
-	end
-	if act and next(act.hours) ~= nil then
-		for h, row in pairs(act.hours) do
-			local bucket = hourApps[h]
-			if not bucket then bucket = {}; hourApps[h] = bucket end
-			for id, secs in pairs(row) do
-				-- 与饼图同一规则：无名的 id（含 mark=0）并进「其他」
-				local nm = id > 0 and names[tostring(id)] or nil
-				local key = nm and id or 0
-				local slot = bucket[key]
-				if not slot then
-					slot = { appid = key, time = 0, name = nm or UNKNOWN_NAME }
-					bucket[key] = slot
-				end
-				slot.time = slot.time + secs
-			end
-		end
-	else
-		local function add_app_hour(h, rec, secs)
+
+	-- 把一段 [ft,lt] 按每小时重叠秒数占比分摊 tt，各小时之和守恒；
+	-- 无名应用并进兜底桶 0（前端会过滤），与环图/流量图的兜底规则一致。
+	local function add_app_hour(h, rec, secs, nm)
 		if secs <= 0 then return end
 		local id = tonumber(rec.id) or 0
+		local key = (id > 0 and nm) and id or 0
 		local row = hourApps[h]
 		if not row then row = {}; hourApps[h] = row end
-		local slot = row[id]
+		local slot = row[key]
 		if not slot then
-			slot = { appid = id, icon = rec.icon, name = rec.name, time = 0 }
-			row[id] = slot
+			slot = { appid = key, icon = rec.icon, name = nm or UNKNOWN_NAME, time = 0 }
+			row[key] = slot
 		end
 		slot.time = slot.time + secs
-		if (not slot.name or slot.name == "") and rec.name and rec.name ~= "" then
-			slot.name = rec.name
-		end
 	end
-	for _, rec in ipairs(merged_sessions(target, today_start())) do
+	local function spread_session_hours(rec, nm)
 		local id = tonumber(rec.id) or 0
-		if id > 0 then
-			local ft = tonumber(rec.ft) or 0
-			local lt = tonumber(rec.lt) or ft
-			if lt < ft then lt = ft end
-			local span = lt - ft
-			local tt = tonumber(rec.tt) or span
-			if span <= 0 then
-				-- 没有跨度可言（瞬时记录），整段记入开始小时
-				add_app_hour(lt_hour(ft), rec, tt)
-			else
-				-- 切出与每个小时重叠的段，按时长占比分摊 tt，取整余数记到
-				-- 最后一段，保证合计守恒。小时边界按配置时区对齐采样器的桶。
-				local segs = {}
-				local off = tz_seconds()
-				local cur = ft
-				while cur < lt do
-					local hb = math.floor((cur + off) / 3600) * 3600 - off
-					local seg = (lt < hb + 3600) and lt or (hb + 3600)
-					segs[#segs + 1] = { hour = lt_hour(cur), ov = seg - cur }
-					cur = seg
+		if id <= 0 then return end
+		local ft = tonumber(rec.ft) or 0
+		local lt = tonumber(rec.lt) or ft
+		if lt < ft then lt = ft end
+		local span = lt - ft
+		local tt = tonumber(rec.tt)
+		if not tt then tt = span end
+		if span <= 0 then
+			-- 没有跨度（瞬时记录），整段记入开始小时
+			add_app_hour(lt_hour(ft), rec, tt, nm)
+		else
+			-- 切出与每个小时重叠的段，按时长占比分摊 tt，取整余数记到
+			-- 最后一段，保证合计守恒。小时边界按配置时区对齐采样器的桶。
+			local segs = {}
+			local off = tz_seconds()
+			local cur = ft
+			while cur < lt do
+				local hb = math.floor((cur + off) / 3600) * 3600 - off
+				local seg = (lt < hb + 3600) and lt or (hb + 3600)
+				segs[#segs + 1] = { hour = lt_hour(cur), ov = seg - cur }
+				cur = seg
+			end
+			local allocated = 0
+			for i, sg in ipairs(segs) do
+				local share
+				if i == #segs then
+					share = tt - allocated
+					if share < 0 then share = 0 end
+				else
+					share = math.floor(tt * sg.ov / span + 0.5)
+					allocated = allocated + share
 				end
-				local allocated = 0
-				for i, sg in ipairs(segs) do
-					local share
-					if i == #segs then
-						share = tt - allocated
-						if share < 0 then share = 0 end
-					else
-						share = math.floor(tt * sg.ov / span + 0.5)
-						allocated = allocated + share
-					end
-					add_app_hour(sg.hour, rec, share)
-				end
+				add_app_hour(sg.hour, rec, share, nm)
 			end
 		end
 	end
-	end -- else（无活跃数据时的会话切片）
+
+	-- 优先：访问记录里当天的离散活跃段（与环图、访问记录列表同一份数据）
+	local today = lt_date("%Y-%m-%d")
+	local visit_segs, got_visits = nil, false
+	if traffic then
+		local ok, v = pcall(traffic.client_active_segments, target, 30)
+		if ok and type(v) == "table" then
+			local picked = {}
+			for _, sg in ipairs(v) do
+				if sg.date == today then picked[#picked + 1] = sg end
+			end
+			if #picked > 0 then
+				visit_segs, got_visits = picked, true
+			end
+		end
+	end
+	if got_visits then
+		for _, sg in ipairs(visit_segs) do
+			local id = tonumber(sg.id) or 0
+			spread_session_hours(sg, id > 0 and names[tostring(id)] or nil)
+		end
+	else
+		-- 兜底 1：apps.json 活跃秒（flowd 1.8.0）
+		local act
+		if traffic then
+			local ok, v = pcall(traffic.client_app_active, target)
+			if ok then act = v end
+		end
+		if act and next(act.hours) ~= nil then
+			for h, row in pairs(act.hours) do
+				local bucket = hourApps[h]
+				if not bucket then bucket = {}; hourApps[h] = bucket end
+				for id, secs in pairs(row) do
+					local nm = id > 0 and names[tostring(id)] or nil
+					local key = nm and id or 0
+					local slot = bucket[key]
+					if not slot then
+						slot = { appid = key, time = 0, name = nm or UNKNOWN_NAME }
+						bucket[key] = slot
+					end
+					slot.time = slot.time + secs
+				end
+			end
+		else
+			-- 兜底 2：会话切片（老数据）
+			for _, rec in ipairs(merged_sessions(target, today_start())) do
+				local id = tonumber(rec.id) or 0
+				local nm = id > 0 and names[tostring(id)] or nil
+				spread_session_hours(rec, nm or rec.name)
+			end
+		end
+	end
 
 	-- 每应用每小时的字节数，与「今日常用 APP」的活跃秒数同一份 apps.json。
 	-- 无名 id 与饼图一样并进兜底桶 0，柱状图会把这个桶过滤掉。
