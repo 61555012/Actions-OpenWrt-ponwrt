@@ -3,7 +3,7 @@
 <script type="text/javascript" src="<%=resource%>/oaf_status/jquery-3.7.1.min.js?v=7.0"></script>
 <script type="text/javascript" src="<%=resource%>/oaf_status/oaf_icon.js?v=7.0"></script>
 <script type="text/javascript" src="<%=resource%>/oaf_status/echarts.min.js?v=5.0"></script>
-<script type="text/javascript" src="<%=resource%>/oaf_status/proto.js?v=1.0"></script>
+<script type="text/javascript" src="<%=resource%>/oaf_status/proto.js?v=2.2"></script>
 
 <script type="text/javascript">
 // 6.1 是 Argon 主题，明暗状态放在 <html data-argon-mode="dark|light">；
@@ -846,20 +846,19 @@
 
 				tr.insertCell(-1).innerHTML = first_time_str;
 				tr.insertCell(-1).innerHTML = latest_time_str;
-				var hour = parseInt(visit_list[i].tt / 3600);
-				var seconds = visit_list[i].tt % 3600;
-				var min = parseInt(seconds / 60)
+				// 时长精确到秒（与官方 OAF 一致）：一次真实访问常只有十几秒，
+				// 按分钟取整会把 12s 显示成 1m，跟左侧首次/末次两列对不上。
+				var tt = parseInt(visit_list[i].tt, 10) || 0;
+				var sec = tt % 60, min = Math.floor(tt / 60) % 60, hour = Math.floor(tt / 3600);
 				var total_time_str;
-				if (visit_list[i].act == 1)
-					total_time_str = "-"
-				else {
-					if (hour > 0)
-						total_time_str = hour + "h " + min + "m"
-					else {
-						if (min == 0)
-							min = 1;
-						total_time_str = min + "m"
-					}
+				if (visit_list[i].act == 1) {
+					total_time_str = "-";
+				} else if (hour > 0) {
+					total_time_str = hour + "h " + min + "m";
+				} else if (min > 0) {
+					total_time_str = min + "m " + sec + "s";
+				} else {
+					total_time_str = sec + "s";
 				}
 
 				tr.insertCell(-1).innerHTML = total_time_str;
@@ -1174,7 +1173,9 @@
 		for (var k = 0; k < appIds.length; k++) {
 			var appId = appIds[k];
 			var appData = appSeries[appId];
-			var color = getAppColor(appId);
+			// 用同屏序号取色而非 appid：保证一张图里相邻系列必定不同色
+			// （基于 appid 的取模/散列都会让本插件常用 id 段撞成一片黄）。
+			var color = getAppColor(k);
 			if (hasBytes) {
 				// 时长不再画虚线折线：每个应用一条，颜色淡、走势又几乎是贴着 0 的
 				// 斜线，几条叠在一起就是一片噪点。改成把每小时的时长放进柱子的数据
@@ -1401,13 +1402,19 @@
 		box.style.display = 'flex';
 	}
 
+	// 应用配色：色相均匀分布的调色板。调用方传的是「同屏序号」0..N-1，
+	// 直接顺序取色即可保证一张图里每个系列颜色都不同。
+	// 旧实现按 appid % 12 取色，本插件常用 id 段（20002/20006/3010/3014 …）
+	// 恰好都落在两个黄色索引上，导致柱状图整片发黄。
+	var APP_COLORS = [
+		'#4e79a7', '#f28e2b', '#59a14f', '#e15759',
+		'#76b7b2', '#b07aa1', '#edc948', '#499894',
+		'#ff9da7', '#9c755f', '#86bcb6', '#d37295',
+		'#8cd17d', '#bab0ac', '#b6992d', '#79706e'
+	];
 	function getAppColor(index) {
-		var colors = [
-			'#5470c6', '#91cc75', '#fac858', '#ee6666',
-			'#73c0de', '#3ba272', '#fc8452', '#9a60b4',
-			'#ea7ccc', '#ff9f7f', '#ffdb5c', '#c23531'
-		];
-		return colors[index % colors.length];
+		var i = Math.abs(Number(index) || 0);
+		return APP_COLORS[i % APP_COLORS.length];
 	}
 
 	function formatTraffic(bytes) {
@@ -1729,6 +1736,11 @@
 					hourlyTrafficChart.resize();
 				}, 100);
 			}
+			// 协议分布已并入本标签页，一起加载并重画
+			if (window.loadProtoTraffic) loadProtoTraffic();
+			setTimeout(function() {
+				if (window.oafProtoResize) window.oafProtoResize();
+			}, 150);
 		}
 		if (tabId === 'tab-app-ranking') {
 			stopVisitAutoRefresh();
@@ -1753,10 +1765,6 @@
 				}, 100);
 			}
 		}
-		if (tabId === 'tab-protocol') {
-			stopVisitAutoRefresh();
-			if (window.loadProtoTraffic) loadProtoTraffic();
-		}
 
 	}
 
@@ -1769,8 +1777,9 @@
 		try {
 			if (id === 'tab-app-duration' && visit_time_data && visit_time_data.length) {
 				display_app_visit_view(visit_time_data);
-			} else if (id === 'tab-traffic-statistics' && hourlyStatsData && hourlyStatsData.length) {
-				renderHourlyTrafficChart(hourlyStatsData);
+			} else if (id === 'tab-traffic-statistics') {
+				if (hourlyStatsData && hourlyStatsData.length) renderHourlyTrafficChart(hourlyStatsData);
+				if (window.loadProtoTraffic) loadProtoTraffic();
 			} else if (id === 'tab-app-ranking' && hourlyStatsData && hourlyStatsData.length) {
 				renderHourlyAppsChart(hourlyStatsData);
 			} else if (id === 'tab-history-traffic') {
@@ -1798,7 +1807,6 @@
 				<li class="tab-item" onclick="showTabContent('tab-history-traffic', this)">历史流量</li>
 				<li class="tab-item" onclick="showTabContent('tab-app-ranking', this)"><%:Today Top Apps%></li>
 			<li class="tab-item" onclick="showTabContent('tab-visit-records', this)"><%:Visit Records%></li>
-			<li class="tab-item" onclick="showTabContent('tab-protocol', this)">协议分布</li>
 		</ul>
 
 			<div id="tab-user-info" class="tab-body active">
@@ -1872,6 +1880,39 @@
 				<div class="bar-chart">
 					<div id="hourly_traffic_chart" style="width:100%;height: 400px;"></div>
 				</div>
+
+				<!-- 协议分布已并入「今日流量」：两者都是今日按小时/按协议的流量拆分，
+				     合并成一个页面，避免与总流量图功能重复、还要切两个标签。 -->
+				<div id="tab-protocol" class="proto-section" style="margin-top:22px;border-top:1px solid rgba(128,128,128,.18);padding-top:16px;">
+					<div class="proto-section-title" style="font-weight:700;font-size:15px;margin-bottom:12px;">按协议拆分 · 今日流量</div>
+					<div class="proto-summary" id="proto_summary">
+						<div class="proto-sum-card total"><div class="proto-sum-label">今日协议流量</div><div class="proto-sum-value" id="proto_total">--</div></div>
+						<div class="proto-sum-card"><div class="proto-sum-label">识别协议</div><div class="proto-sum-value" id="proto_kinds">--</div></div>
+						<div class="proto-sum-card"><div class="proto-sum-label">采样后端</div><div class="proto-sum-value sm" id="proto_backend">--</div></div>
+					</div>
+					<div class="proto-layout">
+						<div class="proto-chart-card">
+							<div id="proto_chart"></div>
+						</div>
+						<div class="proto-side">
+							<div class="proto-card">
+								<div class="proto-card-title">协议构成</div>
+								<div id="proto_legend"></div>
+							</div>
+							<div class="proto-card" id="proto_other_card" style="display:none;">
+								<div class="proto-card-title">其他（OTHER）构成</div>
+								<div id="proto_other_note"></div>
+							</div>
+							<div class="proto-card">
+								<div class="proto-card-title">采样信息</div>
+								<div id="proto_sampler_info"></div>
+							</div>
+						</div>
+					</div>
+					<div class="visit-hint" style="font-size: 12px; opacity: .6; margin: 12px 2px 0; line-height: 1.6;">
+						按协议统计该客户端今日流量。TLS / HTTP / QUIC / FAILED / DNS / 其他 由首包采样识别（ClientHello SNI、HTTP Host、DNS 报文、QUIC 长头、握手失败）。明文特征库只用于应用名匹配，不向内核下发规则；闭源 HNAT 卸载后不回写 conntrack 字节时为估算值。
+					</div>
+				</div>
 			</div>
 
 			<div id="tab-history-traffic" class="tab-body">
@@ -1924,7 +1965,7 @@
 
 			
 			<div id="tab-visit-records" class="tab-body">
-				<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 8px 2px;">与「今日常用 APP」同源：只列今日已识别、且有效时段内流量达到 2 KB 的应用访问（apps.json 的活跃秒数 + 分小时字节）；挂机心跳和未识别应用不列，重启后重新累计。</div>
+				<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 8px 2px;">保留最近 30 天访问记录：只列已识别、且有效时段内流量达到 2 KB 的应用访问（采样器每日落盘的首次/末次连接时刻 + 活跃时长）；挂机心跳和未识别应用不列。</div>
 				<div class="visit-scroll" style="max-height: 1000px; overflow-y: auto;padding-right: 20px;">
 					<table class="table cbi-section-table" id="visit_list_table">
 						<tr class="tr table-titles">
@@ -1953,23 +1994,6 @@
 				</div>
 			<div id="visit_pagination" style="margin-top: 20px;"></div>
 		</div>
-
-		<!-- oaf-lite: L7 协议分布（首包采样打标签，硬件加速后的字节仍按标签累计） -->
-		<div id="tab-protocol" class="tab-body">
-			<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 10px 2px;">
-				按协议统计该客户端今日流量。TLS / HTTP / QUIC / FAILED / DNS / 其他 由首包采样识别（ClientHello SNI、HTTP Host、DNS 报文、QUIC 长头、握手失败）。
-				明文特征库只用于应用名匹配，不向内核下发规则。闭源 HNAT（如 XG040 的 hw_nat）卸载后不回写 conntrack 字节，此时图中仅含首包可采样与未卸载流量，为估算值。
-			</div>
-			<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
-				<div id="proto_chart" style="flex:1 1 380px;min-width:320px;height:340px;"></div>
-				<div style="flex:0 0 240px;min-width:200px;">
-					<div style="font-weight:bold;margin-bottom:10px;">协议图例</div>
-					<div id="proto_legend"></div>
-					<div id="proto_sampler_info" style="margin-top:14px;font-size:12px;opacity:.7;line-height:1.6;"></div>
-					<div id="proto_other_note" style="margin-top:14px;font-size:12px;opacity:.7;line-height:1.6;"></div>
-				</div>
-			</div>
-		</div>
 	</div>
 </div>
 </div>
@@ -1977,6 +2001,90 @@
 <div id="nickname_toast" class="nickname-toast"></div>
 
 <style>
+	/* ---------------- 协议分布 tab ---------------- */
+	.proto-summary {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 12px;
+		margin-bottom: 16px;
+	}
+	.proto-sum-card {
+		background: rgba(128,128,128,.06);
+		border: 1px solid var(--border-color-low, #e5e7eb);
+		border-radius: 10px;
+		padding: 12px 16px;
+		min-width: 0;
+	}
+	.proto-sum-card.total {
+		background: linear-gradient(135deg, rgba(59,130,246,.12), rgba(59,130,246,.03));
+		border-color: rgba(59,130,246,.35);
+	}
+	.proto-sum-label { font-size: 12px; opacity: .6; margin-bottom: 6px; }
+	.proto-sum-value { font-size: 22px; font-weight: 700; line-height: 1.1; }
+	.proto-sum-value.sm { font-size: 14px; font-weight: 600; padding-top: 5px; }
+	.proto-layout {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 16px;
+		align-items: stretch;
+	}
+	.proto-chart-card {
+		flex: 2 1 420px;
+		min-width: 300px;
+		background: rgba(128,128,128,.04);
+		border: 1px solid var(--border-color-low, #e5e7eb);
+		border-radius: 12px;
+		padding: 10px;
+	}
+	#proto_chart { width: 100%; height: 360px; }
+	.proto-side { flex: 1 1 260px; min-width: 230px; display: flex; flex-direction: column; gap: 12px; }
+	.proto-card {
+		background: rgba(128,128,128,.04);
+		border: 1px solid var(--border-color-low, #e5e7eb);
+		border-radius: 12px;
+		padding: 14px 16px;
+	}
+	.proto-card-title { font-weight: 700; font-size: 14px; margin-bottom: 10px; }
+	.proto-legend-row {
+		display: grid;
+		grid-template-columns: 12px 1fr auto;
+		align-items: center;
+		gap: 10px;
+		padding: 7px 0;
+		border-bottom: 1px solid rgba(128,128,128,.14);
+	}
+	.proto-legend-row:last-child { border-bottom: 0; }
+	.proto-legend-dot { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+	.proto-legend-name { font-size: 13px; font-weight: 600; }
+	.proto-legend-bar {
+		grid-column: 2 / -1;
+		height: 5px;
+		border-radius: 3px;
+		background: rgba(128,128,128,.16);
+		overflow: hidden;
+		margin-top: -2px;
+	}
+	.proto-legend-bar > i { display: block; height: 100%; border-radius: 3px; }
+	.proto-legend-meta { font-size: 12px; opacity: .72; text-align: right; white-space: nowrap; }
+	.proto-legend-meta .pct { display: inline-block; min-width: 42px; font-weight: 600; opacity: .9; }
+	.proto-other-row {
+		display: flex; gap: 10px; padding: 5px 0; font-size: 12px;
+		border-bottom: 1px solid rgba(128,128,128,.1);
+	}
+	.proto-other-row:last-of-type { border-bottom: 0; }
+	.proto-other-port { opacity: .7; width: 92px; flex: none; font-family: monospace; }
+	.proto-note { font-size: 12px; opacity: .7; line-height: 1.6; }
+	[data-darkmode="true"] .proto-sum-card,
+	[data-darkmode="true"] .proto-chart-card,
+	[data-darkmode="true"] .proto-card {
+		background: rgba(255,255,255,.03);
+		border-color: rgba(255,255,255,.12);
+	}
+	[data-darkmode="true"] .proto-sum-card.total {
+		background: linear-gradient(135deg, rgba(59,130,246,.2), rgba(59,130,246,.05));
+		border-color: rgba(59,130,246,.45);
+	}
+
 	.user-detail-header {
 		display: flex;
 		align-items: center;
@@ -2556,6 +2664,20 @@
 		#visit_list_table tr.tr > td:nth-child(3)::before { content: "最后："; }
 		#visit_list_table tr.tr > td:nth-child(4)::before { content: "时长："; }
 		#visit_list_table tr.tr > td:nth-child(5)::before { content: "状态："; }
+
+		/* 协议分布：摘要 3 卡在窄屏改 2 列（第 3 卡跨满行），图表与侧栏纵向堆叠 */
+		.proto-summary { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+		.proto-summary .proto-sum-card:last-child { grid-column: 1 / -1; }
+		.proto-sum-card { padding: 10px 12px; }
+		.proto-sum-value { font-size: 19px; }
+		.proto-layout { flex-direction: column; }
+		.proto-chart-card, .proto-side { flex: 1 1 auto; width: 100%; min-width: 0; }
+		#proto_chart { height: 300px; }
+		/* 手机端图例：名称可省略号，百分比不换行，颜色块固定不收缩，避免颜色块/文字相互重叠 */
+		.proto-legend-row { grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px; }
+		.proto-legend-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.proto-legend-dot { width: 12px; height: 12px; }
+		.proto-legend-meta .pct { min-width: 38px; }
 
 		/* 历史流量的每日明细表也别撑破 */
 		.history-day-table { font-size: 12px; }

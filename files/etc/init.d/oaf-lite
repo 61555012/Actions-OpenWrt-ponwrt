@@ -7,15 +7,14 @@ USE_PROCD=1
 start_service() {
 	config_load oaf-lite
 	config_get lan_if   main lan_if   "br-lan"
-	config_get feature  main feature  "/etc/fwxd/feature.bin"
+	config_get feature  main feature  "/etc/fwxd/feature.cfg"
 	config_get tz       main tz       "8"
 	config_get fast     main fast     "1"
 	config_get slow     main slow     "3"
 	config_get backend  main backend  "auto"
 	config_get hnat     main hnat_aggr "0"
 
-	# 官方 FWXB 库优先（仓库自带）；明文 feature.cfg 若自己放了也能用
-	[ -f "$feature" ] || feature="/etc/fwxd/feature.cfg"
+	[ -f "$feature" ] || feature="/etc/fwxd/feature.bin"
 	[ -f "$feature" ] || {
 		logger -t oaf-lite "feature library missing, daemon not started"
 		return 1

@@ -852,20 +852,31 @@ function api_dev_visit_list(mac)
 	if req_size < 1 then req_size = 15 end
 	if req_size > 200 then req_size = 200 end
 
-	-- 与「今日常用 APP」同源：apps.json 的活跃秒数 + 字节，按小时桶
-	-- 2 KiB 门槛过滤。挂机心跳、特征库认不出的应用都不进表。
+	-- 访问记录与官方 OAF 同口径：采样器 active.json 的「离散活跃段」——
+	-- 每次连续使用一行，ft/lt 为真实起止，tt=lt-ft（墙上时间差），秒级显示。
+	-- 静默 >120s 切段；<2KiB/窗口的挂机心跳不成段、不进表。历史段来自日文件。
+	-- 采样器还没有 active.json（老固件/刚升级）时才退回旧的「每应用每天一条
+	-- 聚合」口径，再退回落盘会话。
 	local all, meta, persisted = {}, nil, true
-	local visits = traffic and traffic.client_app_visits(target)
-	if type(visits) == "table" then
-		local names = load_app_names()
-		local now = os.time()
+	local names = load_app_names()
+	local now = os.time()
+	local visits = traffic and traffic.client_active_segments and
+		traffic.client_active_segments(target, 30)
+	if type(visits) ~= "table" or #visits == 0 then
+		visits = traffic and traffic.client_app_visits_history and
+			traffic.client_app_visits_history(target, 30)
+	end
+	if type(visits) ~= "table" or #visits == 0 then
+		visits = traffic and traffic.client_app_visits(target)
+	end
+	if type(visits) == "table" and #visits > 0 then
 		for _, v in ipairs(visits) do
 			local nm = (v.id > 0 and names[tostring(v.id)]) or nil
 			if nm then
 				all[#all + 1] = {
 					id = v.id, name = nm,
 					ft = v.ft, lt = v.lt, tt = v.tt,
-					bytes = v.bytes,
+					bytes = v.bytes, date = v.date,
 					online = (now - v.lt <= 120) and 1 or 0,
 				}
 			end
@@ -894,7 +905,7 @@ function api_dev_visit_list(mac)
 		total_page = total_page,
 		page       = req_page,
 		page_size  = req_size,
-		keep_days  = 1,
+		keep_days  = 30,
 		persisted  = persisted,
 	})
 end

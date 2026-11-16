@@ -951,64 +951,141 @@ function M.client_app_bytes(mac)
 	return hours
 end
 
--- 访问记录：与「今日常用 APP」同源，只读 apps.json 的活跃秒数 "a" 和字节 "h"。
--- 每个采样窗口搬够 2 KiB 才算一次有效访问，挂机心跳不会出现在 a 里；
--- 这里再按小时桶做一次 2 KiB 字节门槛，只有过线的桶才计入时长和流量。
--- 一个应用合并成一条：首次/最后访问 = 第一个/最后一个有效小时桶，
--- 时长 = 各有效桶的活跃秒数之和。返回按字节降序，无名字的 id 由控制器过滤。
+-- ---------------------------------------------------------------- 访问记录
+-- 与官方 OAF 同口径：采样器在 active.json 写「离散活跃段」——每个段是一次
+-- 连续使用（>=2KiB/窗口，静默超过 120s 切段），ft=开始、lt=结束，tt=lt-ft
+-- （真实墙上时间）。挂机心跳每窗口 <2KiB，永远不会成段，因此不进表。
+-- 日文件 day/YYYY-MM-DD.json 也带 active 段，30 天历史与今天同口径。
+local ACTIVE = "/tmp/oaf-lite/active.json"
+local HIST_DAYS = "/tmp/oaf-lite/day"
+local active_cache, active_key, active_at = nil, nil, 0
+
+local function read_active_map(path)
+	local raw = read_json(path)
+	if type(raw) ~= "table" or type(raw.clients) ~= "table" then return nil end
+	return raw.clients
+end
+
+-- 把一段 active.json 记录并进 out。key 用 (id,ft) 去重：日文件和实时文件
+-- 边界处同一段可能各出现一次，取较大的 lt。
+local function merge_segs(out, seen, list, date)
+	if type(list) ~= "table" then return end
+	for _, sg in ipairs(list) do
+		local id = tonumber(sg.id) or 0
+		local ft = tonumber(sg.ft) or 0
+		local lt = tonumber(sg.lt) or ft
+		if id > 0 and ft > 0 then
+			if lt < ft then lt = ft end
+			local key = date .. "|" .. id .. "|" .. ft
+			local cur = seen[key]
+			if not cur then
+				cur = { id = id, ft = ft, lt = lt, tt = lt - ft, date = date }
+				seen[key] = cur
+				out[#out + 1] = cur
+			elseif lt > cur.lt then
+				cur.lt = lt
+				cur.tt = lt - cur.ft
+			end
+		end
+	end
+end
+
+function M.client_active_segments(mac, days)
+	if not mac or mac == "" then return {} end
+	if days < 1 then days = 30 end
+	local now = os.time()
+	local key = mac:lower() .. "|" .. days .. "|" .. M.local_date("%Y-%m-%d", now)
+	if active_cache and active_key == key and now - active_at < 20 then
+		return active_cache
+	end
+	active_key, active_at = key, now
+
+	local want = mac:lower()
+	local midnight = M.local_midnight(now)
+	local out, seen = {}, {}
+	-- 今天：active.json（实时，2 秒级新鲜）
+	local live = read_active_map(ACTIVE)
+	if live then merge_segs(out, seen, live[want] or live[mac:upper()], M.local_date("%Y-%m-%d", now)) end
+	-- 历史：每个日文件的 active 段
+	for d = 0, days - 1 do
+		local day = M.local_date("%Y-%m-%d", midnight - d * 86400)
+		local clients = read_active_map(HIST_DAYS .. "/" .. day .. ".json")
+		if clients then merge_segs(out, seen, clients[want] or clients[mac:upper()], day) end
+	end
+	table.sort(out, function(x, y)
+		if x.lt ~= y.lt then return x.lt > y.lt end
+		return x.ft > y.ft
+	end)
+	active_cache = out
+	return out
+end
+
+-- 旧数据兜底：采样器还没有 active.json（老固件/刚升级）时，退回原来的
+-- 「每应用每天一条」聚合口径（ft/lt=首末有效窗口，tt=活跃秒之和）。
 function M.client_app_visits(mac)
 	if not mac or mac == "" then return {} end
 	local list = M.app_traffic(mac)
 	if type(list) ~= "table" then return {} end
 	local now = os.time()
-	-- 必须用配置时区的午夜：apps.json 里的小时桶是采样器按 tz=8 落的，
-	-- 用系统时区（这台机器是 UTC）算午夜会让访问时间整体偏 8 小时。
 	local midnight = M.local_midnight(now)
 	local MIN_BYTES = 2048
 	local out = {}
 	for _, a in ipairs(list) do
 		local id = tonumber(a.id) or 0
+		local ft = tonumber(a.ft) or 0
+		local lt = tonumber(a.lt) or 0
+		local vb = tonumber(a.vb) or 0
 		local secs, byts = a.a, a.h
-		if type(secs) == "table" then
-			local total, tt, first, last, last_secs = 0, 0, nil, nil, 0
-			local hours = {}
-			for h in pairs(secs) do
-				local hh = tonumber(h)
-				if hh then hours[#hours + 1] = hh end
+		if ft > 0 then
+			if lt < ft then lt = ft end
+			local tt = 0
+			if type(secs) == "table" then
+				for _, v in pairs(secs) do tt = tt + (tonumber(v) or 0) end
 			end
-			table.sort(hours)
-			for _, hh in ipairs(hours) do
-				local active = tonumber(secs[tostring(hh)] or secs[hh]) or 0
-				local b = 0
-				if type(byts) == "table" then
-					local v = byts[tostring(hh)] or byts[hh]
-					if type(v) == "table" then
-						b = (tonumber(v.up) or tonumber(v[1]) or 0)
-						  + (tonumber(v.down) or tonumber(v[2]) or 0)
+			out[#out + 1] = { id = id, ft = ft, lt = lt, tt = tt, bytes = vb }
+		else
+			if type(secs) == "table" then
+				local total, tt, first, last, last_secs = 0, 0, nil, nil, 0
+				local hours = {}
+				for h in pairs(secs) do
+					local hh = tonumber(h)
+					if hh then hours[#hours + 1] = hh end
+				end
+				table.sort(hours)
+				for _, hh in ipairs(hours) do
+					local active = tonumber(secs[tostring(hh)] or secs[hh]) or 0
+					local b = 0
+					if type(byts) == "table" then
+						local v = byts[tostring(hh)] or byts[hh]
+						if type(v) == "table" then
+							b = (tonumber(v.up) or tonumber(v[1]) or 0)
+							  + (tonumber(v.down) or tonumber(v[2]) or 0)
+						end
+					end
+					if active > 0 and b >= MIN_BYTES then
+						total = total + b
+						tt = tt + active
+						if not first then first = hh end
+						last, last_secs = hh, active
 					end
 				end
-				if active > 0 and b >= MIN_BYTES then
-					total = total + b
-					tt = tt + active
-					if not first then first = hh end
-					last, last_secs = hh, active
+				if first and total > 0 then
+					local fft = midnight + first * 3600
+					local hour_start = midnight + last * 3600
+					local elapsed = math.max(0, now - hour_start)
+					local llt = hour_start + math.min(last_secs, elapsed)
+					if llt < fft then llt = fft end
+					out[#out + 1] = { id = id, ft = fft, lt = llt, tt = tt, bytes = total }
 				end
-			end
-			if first and total > 0 then
-				local ft = midnight + first * 3600
-				-- apps.json 只有每小时的活跃秒总数，没有具体时刻。把活跃秒当作
-				-- 从整点连续发生来近似末次访问；当前小时用已流逝秒数封顶，避免
-				-- 把每个应用都算成「刚刚还在传数据」而全部显示在线。
-				local hour_start = midnight + last * 3600
-				local elapsed = math.max(0, now - hour_start)
-				local lt = hour_start + math.min(last_secs, elapsed)
-				if lt < ft then lt = ft end
-				out[#out + 1] = { id = id, ft = ft, lt = lt, tt = tt, bytes = total }
 			end
 		end
 	end
 	table.sort(out, function(x, y) return x.bytes > y.bytes end)
 	return out
+end
+
+function M.client_app_visits_history(mac, days)
+	return M.client_app_visits(mac)
 end
 
 -- Flow offload as the firewall config sees it. Read, not parsed by uci: this

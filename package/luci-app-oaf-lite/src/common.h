@@ -28,6 +28,12 @@
 #define OL_MAX_PKT_ROUND  4096     /* hard cap on packets parsed per round */
 #define OL_MAX_FLOW_PKTS  8        /* only the first N packets of a flow */
 #define OL_ACTIVE_MIN     2048     /* bytes/window before a window is "active" */
+/* 离散活跃访问段：与官方 OAF active.json 同口径。一个段 = 一次连续使用：
+ * 从第一个达到 2 KiB 的采样窗口(ft)到最后一个(lt)，tt = lt - ft。两次使用
+ * 之间静默超过 OL_SEG_GAP 秒就切成两段。tt 用真实墙上时间差，不用「活跃秒
+ * 数之和」——后者和 First/Last 两列对不上（4 分钟区间却显示 41s）。 */
+#define OL_SEG_GAP        120      /* seconds of idle that splits two visits */
+#define OL_MAX_APP_SEGS   64       /* discrete visits kept per app per day */
 #define OL_IDLE_SEC       3        /* slow sampling when nobody is watching */
 #define OL_ACTIVE_SEC     1        /* fast channel while the page is open */
 #define OL_FULL_SEC       10       /* hourly/apps serialisation throttle */
@@ -52,6 +58,9 @@ extern const char *ol_proto_names[PROTO_MAX];
 extern const char *ol_proto_colors[PROTO_MAX];
 
 typedef struct { uint64_t up, down; } pair_t;
+
+/* One discrete active visit (official OAF active.json shape). */
+typedef struct { time_t ft, lt; } visit_seg_t;
 
 typedef struct { int id; char name[64]; int class_id; } appname_t;
 typedef struct { int id; char key[32]; char name[64]; } appclass_t;
@@ -86,6 +95,16 @@ typedef struct {
     uint64_t up, down;
     pair_t   hours[24];
     double   active[24];
+    time_t   first_ts;   /* first window with >=2KiB traffic (real connect time) */
+    time_t   last_ts;    /* last window with >=2KiB traffic (real end time) */
+    uint64_t valid_bytes;/* total bytes counted while window was active */
+    /* Discrete visits (official active.json): one seg per continuous active
+     * stretch. segs[] holds closed visits; n_segs is their count. The currently
+     * open visit is tracked by cur_ft/cur_lt (cur_ft=0 when none open) and is
+     * emitted as a live segment alongside the closed ones. */
+    visit_seg_t segs[OL_MAX_APP_SEGS];
+    int      n_segs;
+    time_t   cur_ft, cur_lt;
 } app_stat_t;
 
 /* 速率采样：存的是**累计字节**与采样时刻（秒，带小数），不是每拍增量。
@@ -107,6 +126,9 @@ typedef struct {
     int      n_apps;
     pair_t   proto[PROTO_MAX];
     int      proto_flows[PROTO_MAX];
+    /* Per-hour protocol bytes for the protocol-distribution stacked bars,
+     * same 24-bucket layout as apps[].hours. Written to proto.json. */
+    pair_t   proto_hours[PROTO_MAX][24];
     uint64_t prev_up, prev_down, prev_up6, prev_down6;
     double   rate_up, rate_down, rate_up6, rate_down6;
     rate_sample_t rh[16];

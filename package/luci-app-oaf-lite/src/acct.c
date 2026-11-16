@@ -705,6 +705,12 @@ static void account(const char *mac, uint64_t du, uint64_t dd,
     }
     c->proto[proto].up += du;
     c->proto[proto].down += dd;
+    /* Per-hour protocol bytes for the stacked-bar chart in the protocol tab.
+     * Same hour bucket h used for apps/clients, so all charts line up. */
+    if (h >= 0 && h < 24) {
+        c->proto_hours[proto][h].up += du;
+        c->proto_hours[proto][h].down += dd;
+    }
     c->round_bytes += du + dd;
     G.total_up += du; G.total_down += dd;
     G.hours[h].up += du; G.hours[h].down += dd;
@@ -1104,8 +1110,39 @@ void acct_settle(double dt)
         if (c->flows > 0 || c->round_bytes >= OL_ACTIVE_MIN) c->day_online += dt;
         if (c->apps) {
             for (j = 0; j < c->n_apps; j++) {
-                if (c->round_appbytes[j] >= OL_ACTIVE_MIN)
-                    c->apps[j].active[h] += dt;
+                app_stat_t *a = &c->apps[j];
+                if (c->round_appbytes[j] >= OL_ACTIVE_MIN) {
+                    a->active[h] += dt;
+                    /* Real connect/end timestamps (legacy aggregate, kept for
+                     * the pie chart and old readers). Only a window that
+                     * actually carried >=2KiB counts: idle keep-alives never
+                     * touch these fields, so they never surface as a visit. */
+                    if (a->first_ts == 0) a->first_ts = G.now;
+                    a->last_ts = G.now;
+                    a->valid_bytes += c->round_appbytes[j];
+                    /* Discrete active visit (official OAF active.json shape).
+                     * A run of active windows <=OL_SEG_GAP apart is ONE visit;
+                     * a longer idle gap closes it and the next active window
+                     * opens a new one. tt for the list is lt-ft (wall clock),
+                     * NOT the sum of active seconds — that made First/Last and
+                     * Duration columns disagree. */
+                    if (a->cur_ft == 0) {
+                        a->cur_ft = a->cur_lt = G.now;
+                    } else if (G.now - a->cur_lt > OL_SEG_GAP) {
+                        if (a->n_segs < OL_MAX_APP_SEGS) {
+                            a->segs[a->n_segs].ft = a->cur_ft;
+                            a->segs[a->n_segs].lt = a->cur_lt;
+                            a->n_segs++;
+                        }
+                        a->cur_ft = a->cur_lt = G.now;
+                    } else {
+                        a->cur_lt = G.now;
+                    }
+                    /* Keep the live segment's end at least one sampling tick
+                     * after its start, so a one-window visit doesn't show up
+                     * as "First == Last, 0s" (official OAF avoids this too). */
+                    if (a->cur_lt <= a->cur_ft) a->cur_lt = a->cur_ft + 1;
+                }
             }
         }
         c->round_bytes = 0;
@@ -1345,6 +1382,12 @@ static void write_apps(sb_t *b)
                    N(a->up), N(a->down));
             { const char *nm = feature_app_name(a->id);
               sb_jstr(b, nm ? nm : (a->id == 0 ? "未识别" : "")); }
+            /* real first/last active epoch seconds + bytes counted in those
+             * active windows (2KiB threshold); 0 when this app was only ever
+             * idle keep-alive traffic. */
+            sb_add(b, ",\"ft\":%s,\"lt\":%s,\"vb\":%s",
+                   N((uint64_t)a->first_ts), N((uint64_t)a->last_ts),
+                   N(a->valid_bytes));
             sb_add(b, ",\"h\":{");
             for (h = 0, k = 0; h < 24; h++) {
                 if (a->hours[h].up == 0 && a->hours[h].down == 0) continue;
@@ -1367,9 +1410,64 @@ static void write_apps(sb_t *b)
     sb_flush(b, path);
 }
 
+/* Emit the discrete active visits of one app as JSON array items:
+ *   [{"id":appid,"ft":..,"lt":..}, ...]
+ * Closed segments first (oldest last in segs[], we reverse to keep recent
+ * first like official active.json), then the live/open one. The open segment
+ * is included so a visit still in progress shows up without waiting for a gap. */
+static void emit_app_segs(sb_t *b, const app_stat_t *a, int appid, int *first)
+{
+    int k;
+    for (k = a->n_segs - 1; k >= 0; k--) {
+        if (!*first) sb_add(b, ",");
+        *first = 0;
+        sb_add(b, "{\"id\":%d,\"ft\":%s,\"lt\":%s}", appid,
+               N((uint64_t)a->segs[k].ft), N((uint64_t)a->segs[k].lt));
+    }
+    if (a->cur_ft > 0) {
+        if (!*first) sb_add(b, ",");
+        *first = 0;
+        sb_add(b, "{\"id\":%d,\"ft\":%s,\"lt\":%s}", appid,
+               N((uint64_t)a->cur_ft), N((uint64_t)a->cur_lt));
+    }
+}
+
+/* Official OAF active.json: {clients: {mac: [{id,ft,lt},...]}}.
+ * One row per continuous active visit, most recent first. 2 KiB gate already
+ * applied when the segments were built in acct_settle(). */
+static void write_active(sb_t *b)
+{
+    int i, j, first_client = 1;
+    char path[300];
+    sb_add(b, "{\"updated\":%s,\"clients\":{", N((uint64_t)G.now));
+    for (i = 0; i < G.n_clients; i++) {
+        client_t *c = &G.clients[i];
+        char ml[64]; int z, first = 1, any = 0;
+        if (!c->apps) continue;
+        for (j = 0; j < c->n_apps; j++) {
+            if (c->apps[j].n_segs > 0 || c->apps[j].cur_ft > 0) { any = 1; break; }
+        }
+        if (!any) continue;
+        strncpy(ml, c->mac, sizeof(ml) - 1); ml[sizeof(ml) - 1] = '\0';
+        for (z = 0; ml[z]; z++) ml[z] = (char)tolower((unsigned char)ml[z]);
+        if (!first_client) sb_add(b, ",");
+        first_client = 0;
+        sb_jstr(b, ml);
+        sb_add(b, ":[");
+        for (j = 0; j < c->n_apps; j++) {
+            app_stat_t *a = &c->apps[j];
+            emit_app_segs(b, a, a->id, &first);
+        }
+        sb_add(b, "]");
+    }
+    sb_add(b, "}}");
+    snprintf(path, sizeof(path), "%s/active.json", G.dir);
+    sb_flush(b, path);
+}
+
 static void write_proto(sb_t *b)
 {
-    int i, p, first_client = 1;
+    int i, p, h, k, first_client = 1;
     char path[300];
     sb_add(b, "{\"updated\":%s,\"hw_offload_unreliable\":%d,\"order\":[",
             N((uint64_t)G.now), G.hw_offload_unreliable);
@@ -1405,8 +1503,18 @@ static void write_proto(sb_t *b)
             if (!first) sb_add(b, ",");
             first = 0;
             sb_add(b, "{\"name\":"); sb_jstr(b, ol_proto_names[p]);
-            sb_add(b, ",\"up\":%s,\"down\":%s,\"flows\":%d}",
+            sb_add(b, ",\"up\":%s,\"down\":%s,\"flows\":%d,\"h\":{",
                    N(c->proto[p].up), N(c->proto[p].down), c->proto_flows[p]);
+            /* Per-hour buckets for the stacked-bar chart. Same sparse "h" map
+             * apps.json uses: only hours with traffic are emitted, so an idle
+             * box does not send 24 zero entries per protocol. */
+            for (h = 0, k = 0; h < 24; h++) {
+                if (c->proto_hours[p][h].up == 0 && c->proto_hours[p][h].down == 0) continue;
+                if (k++) sb_add(b, ",");
+                sb_add(b, "\"%d\":{\"up\":%s,\"down\":%s}", h,
+                       N(c->proto_hours[p][h].up), N(c->proto_hours[p][h].down));
+            }
+            sb_add(b, "}}");
         }
         sb_add(b, "]");
     }
@@ -1554,10 +1662,56 @@ static void write_day(sb_t *b)
             sb_jstr(b, ml);
             sb_add(b, ":[");
             for (j = 0; j < c->n_apps; j++) {
+                app_stat_t *a = &c->apps[j];
+                int h, k2;
                 if (j) sb_add(b, ",");
-                sb_add(b, "{\"id\":%d,\"up\":%s,\"down\":%s}",
-                       c->apps[j].id, N(c->apps[j].up), N(c->apps[j].down));
+                /* Keep the same shape as apps.json so the visit-record reader
+                 * can consume historical day files exactly like the live one:
+                 * real first/last active epoch + valid bytes + active seconds. */
+                sb_add(b, "{\"id\":%d,\"up\":%s,\"down\":%s,\"ft\":%s,\"lt\":%s,\"vb\":%s,\"a\":{",
+                       a->id, N(a->up), N(a->down),
+                       N((uint64_t)a->first_ts), N((uint64_t)a->last_ts),
+                       N(a->valid_bytes));
+                for (h = 0, k2 = 0; h < 24; h++) {
+                    if (a->active[h] <= 0) continue;
+                    if (k2++) sb_add(b, ",");
+                    sb_add(b, "\"%d\":%.0f", h, a->active[h]);
+                }
+                sb_add(b, "}");
+                /* Discrete visits for this app, official active.json shape.
+                 * Stored per day so the 30-day visit history keeps the same
+                 * tt=lt-ft semantics as today. */
+                sb_add(b, ",\"s\":[");
+                {
+                    int f2 = 1;
+                    emit_app_segs(b, a, a->id, &f2);
+                }
+                sb_add(b, "]}");
             }
+            sb_add(b, "]");
+        }
+    }
+    sb_add(b, "}");   /* close apps object */
+    /* Top-level active map (same shape as active.json) for readers that want
+     * the whole day's segments without walking every app. */
+    sb_add(b, ",\"active\":{");
+    {
+        int fc = 1;
+        for (i = 0; i < G.n_clients; i++) {
+            client_t *c = &G.clients[i];
+            char ml[64]; int z, f = 1, any = 0;
+            if (!c->apps) continue;
+            for (j = 0; j < c->n_apps; j++) {
+                if (c->apps[j].n_segs > 0 || c->apps[j].cur_ft > 0) { any = 1; break; }
+            }
+            if (!any) continue;
+            strncpy(ml, c->mac, sizeof(ml) - 1); ml[sizeof(ml) - 1] = '\0';
+            for (z = 0; ml[z]; z++) ml[z] = (char)tolower((unsigned char)ml[z]);
+            if (!fc) sb_add(b, ",");
+            fc = 0;
+            sb_jstr(b, ml); sb_add(b, ":[");
+            for (j = 0; j < c->n_apps; j++)
+                emit_app_segs(b, &c->apps[j], c->apps[j].id, &f);
             sb_add(b, "]");
         }
     }
@@ -1649,6 +1803,7 @@ void acct_write_json(int full)
     if (full) {
         write_hourly(b);
         write_apps(b);
+        write_active(b);
         write_proto(b);
         write_users(b);
         write_day(b);
@@ -1674,6 +1829,7 @@ void acct_roll_day(const char *newday)
         c->day_active = c->day_online = 0;
         memset(c->hours, 0, sizeof(c->hours));
         memset(c->proto, 0, sizeof(c->proto));
+        memset(c->proto_hours, 0, sizeof(c->proto_hours));
         memset(c->proto_flows, 0, sizeof(c->proto_flows));
         c->rh_n = c->rh_i = 0;
         memset(c->rh, 0, sizeof(c->rh));
@@ -1682,6 +1838,10 @@ void acct_roll_day(const char *newday)
                 c->apps[j].up = c->apps[j].down = 0;
                 memset(c->apps[j].hours, 0, sizeof(c->apps[j].hours));
                 memset(c->apps[j].active, 0, sizeof(c->apps[j].active));
+                c->apps[j].first_ts = c->apps[j].last_ts = 0;
+                c->apps[j].valid_bytes = 0;
+                c->apps[j].n_segs = 0;
+                c->apps[j].cur_ft = c->apps[j].cur_lt = 0;
             }
         }
     }

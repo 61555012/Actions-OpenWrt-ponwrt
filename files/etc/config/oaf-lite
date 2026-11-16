@@ -3,9 +3,11 @@ config oaf-lite 'main'
 	# removes later packets from the CPU; only the first OL_MAX_FLOW_PKTS are
 	# ever parsed, so loss only affects identification, never byte counters.
 	option lan_if 'br-lan'
-	# Official OAF v4.0 library (FWXB, decrypted in-process). A plaintext
-	# feature.cfg is accepted too — drop it here and point option to it.
-	option feature '/etc/fwxd/feature.bin'
+	# Plaintext OAF library (byte-identical to the decrypted FWXB bin, but
+	# editable): app names are kept Title-Case here; the encrypted feature.bin
+	# is kept as a fallback reference. feature.local.cfg is merged from the
+	# same directory, so custom rules / name fixes take effect at startup.
+	option feature '/etc/fwxd/feature.cfg'
 	# conntrack = open PPE / flowtable writeback (AN7581, MTK mtk_ppe)
 	# hnat-aggr = additionally poll "hw_nat -A AG" for vendor closed HNAT
 	option backend 'auto'

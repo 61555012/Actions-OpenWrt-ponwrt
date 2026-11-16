@@ -1704,7 +1704,11 @@ function oafAppIconSrc(id) {
 						var vName = app.name || '';
 						var vId = String(app.id || '');
 						var vSrc = vId ? oafAppIconSrc(vId) : '';
-						var vIconDisabled = app && (app.icon === 0 || app.icon === '0' || app.hasIcon === false);
+						// 后端 fwx 对任何应用都回 icon=0，那是旧 appfilter 的标记，
+						// 与本插件 /oaf/app_icons/<id>.png 无关。若照它 disable，
+						// 自己补进特征库的应用永远只显示首字母。这里一律尝试加载
+						// 真实 PNG，加载失败再由 Image.onerror 回退首字母。
+						var vIconDisabled = app && (app.hasIcon === false);
 						if (vId && vIconDisabled) {
 							_iconStatusCache[vId] = 'failed';
 						}
