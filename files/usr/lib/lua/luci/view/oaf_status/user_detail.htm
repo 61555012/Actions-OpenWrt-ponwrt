@@ -101,7 +101,6 @@
 	let visit_page_size = 15;
 	let visit_total_num = 0;
 	let visit_total_page = 1;
-	let hourlyTrafficChart = null;
 	let hourlyAppsChart = null;
 	let hourlyStatsData = null;
 	let appTimeChart = null;
@@ -578,9 +577,8 @@
 			function (x, st) {
 				if (st && st.hourly_stats) {
 					hourlyStatsData = st.hourly_stats;
-					if (tabTrafficStatistics && tabTrafficStatistics.classList.contains('active')) {
-						renderHourlyTrafficChart(hourlyStatsData);
-					}
+					// 「今日流量」页现在只画带协议识别的那张柱状图（proto.js），
+					// 这里的数据只留给「今日 TOP 应用」的应用柱状图用。
 					if (tabAppRanking && tabAppRanking.classList.contains('active')) {
 						renderHourlyAppsChart(hourlyStatsData);
 					}
@@ -938,175 +936,7 @@
 		loadVisitListData(visit_cur_page);
 	}
 
-	function renderHourlyTrafficChart(hourlyStats) {
-		var chartDom = document.getElementById('hourly_traffic_chart');
-		if (!chartDom) {
-			console.error('hourly_traffic_chart element not found');
-			return;
-		}
-		
-		if (hourlyTrafficChart) {
-			hourlyTrafficChart.dispose();
-			hourlyTrafficChart = null;
-		}
-		
-		hourlyTrafficChart = echarts.init(chartDom, null, { renderer: FWX_ECHART_RENDERER });
-		if (!hourlyTrafficChart) {
-			console.error('Failed to initialize hourlyTrafficChart');
-			return;
-		}
-		
-		var hours = [];
-		var upBytes = [];
-		var downBytes = [];
-		
-		var sortedStats = hourlyStats.slice().sort(function(a, b) {
-			return a.hour - b.hour;
-		});
-		
-		for (var i = 0; i < sortedStats.length; i++) {
-			var stat = sortedStats[i];
-			hours.push(stat.hour + ':00');
-			if (stat.traffic) {
-				upBytes.push(Math.round(stat.traffic.up_bytes / (1024 * 1024))); 
-				downBytes.push(Math.round(stat.traffic.down_bytes / (1024 * 1024))); 
-			} else {
-				upBytes.push(0);
-				downBytes.push(0);
-			}
-		}
-		
-		var textColor = window.getComputedStyle(document.body).color || '#ffffff';
-		
-		var option = {
-			animation: !FWX_NARROW,  
-			title: {
-				text: '<%:Today Traffic Statistics (24 Hours)%>',
-				left: 'center',
-				textStyle: {
-					color: textColor
-				}
-			},
-			tooltip: {
-				trigger: 'axis',
-				axisPointer: {
-					type: 'shadow'
-				},
-				formatter: function(params) {
-					var result = params[0].name + '<br/>';
-					for (var i = 0; i < params.length; i++) {
-						var param = params[i];
-						var value = param.value;
-						var totalBytes = value * 1024 * 1024;
-						var formatted = formatTraffic(totalBytes);
-						result += param.seriesName + ': ' + formatted + '<br/>';
-					}
-					return result;
-				}
-			},
-			legend: {
-				data: ['<%:Upstream Traffic%>', '<%:Downstream Traffic%>'],
-				top: 30,
-				textStyle: {
-					color: textColor
-				}
-			},
-			grid: {
-				left: '1%',
-				right: '1%',
-				bottom: '10%',
-				top: '15%',
-				containLabel: true
-			},
-			xAxis: {
-				type: 'category',
-				data: hours,
-				axisLabel: {
-					color: textColor,
-					rotate: FWX_NARROW ? 0 : 45,
-					interval: FWX_NARROW ? 3 : 0,
-					fontSize: FWX_NARROW ? 10 : 12
-				},
-				axisLine: {
-					lineStyle: {
-						color: textColor
-					}
-				}
-			},
-			yAxis: {
-			type: 'value',
-			name: FWX_NARROW ? '' : '<%:Traffic%>',
-			minInterval: 1,
-			nameTextStyle: {
-				color: textColor
-			},
-			axisLabel: {
-				color: textColor,
-				/* 单位换算后保留一位小数：原来 1200MB 和 1500MB 都被
-				   Math.round 成「1GB」，纵轴上连着两个 1GB，看不出量级差。
-				   整数就不带小数点（2GB / 1.5GB）。 */
-				formatter: function(value) {
-					if (!value) return '0';
-					if (value >= 1024) {
-						var gb = value / 1024;
-						return (gb >= 10 ? Math.round(gb) : parseFloat(gb.toFixed(1))) + 'GB';
-					}
-					if (value >= 1) {
-						return (value >= 10 ? Math.round(value) : parseFloat(value.toFixed(1))) + 'MB';
-					}
-					var kb = value * 1024;
-					return (kb >= 10 ? Math.round(kb) : parseFloat(kb.toFixed(1))) + 'KB';
-				}
-			},
-			axisLine: {
-				lineStyle: {
-					color: textColor
-				}
-			},
-			splitLine: {
-				lineStyle: {
-					color: 'rgba(255, 255, 255, 0.1)'
-				}
-			}
-		},
-			series: [
-				{
-					name: '<%:Upstream Traffic%>',
-					type: 'bar',
-					data: upBytes,
-					stack: 'traffic',
-					barWidth: 20,
-					barMaxWidth: 30,
-					itemStyle: {
-						color: '#5470c6'
-					}
-				},
-				{
-					name: '<%:Downstream Traffic%>',
-					type: 'bar',
-					data: downBytes,
-					stack: 'traffic',
-					barWidth: 20,
-					barMaxWidth: 30,
-					itemStyle: {
-						color: '#91cc75'
-					}
-				}
-			]
-		};
-		
-		if (!hourlyTrafficChart) {
-			console.error('hourlyTrafficChart is null, cannot setOption');
-			return;
-		}
-		
-		hourlyTrafficChart.setOption(option);
-		setTimeout(function() {
-			if (hourlyTrafficChart) {
-				hourlyTrafficChart.resize();
-			}
-		}, 200);
-	}
+	// renderHourlyTrafficChart 已移除：「今日流量」页只保留 proto.js 的带协议识别柱状图。
 
 	function renderHourlyAppsChart(hourlyStats) {
 		var chartDom = document.getElementById('hourly_apps_chart');
@@ -1726,17 +1556,8 @@
 		}
 		if (tabId === 'tab-traffic-statistics') {
 			stopVisitAutoRefresh();
-			if (hourlyStatsData && hourlyStatsData.length > 0) {
-				renderHourlyTrafficChart(hourlyStatsData);
-			} else {
-				loadHourlyStatsData();
-			}
-			if (hourlyTrafficChart) {
-				setTimeout(function() {
-					hourlyTrafficChart.resize();
-				}, 100);
-			}
-			// 协议分布已并入本标签页，一起加载并重画
+			// 本标签页现在只有带协议识别的那张柱状图（proto.js），
+			// 旧的「上下行总量」柱图 renderHourlyTrafficChart 已移除。
 			if (window.loadProtoTraffic) loadProtoTraffic();
 			setTimeout(function() {
 				if (window.oafProtoResize) window.oafProtoResize();
@@ -1778,7 +1599,6 @@
 			if (id === 'tab-app-duration' && visit_time_data && visit_time_data.length) {
 				display_app_visit_view(visit_time_data);
 			} else if (id === 'tab-traffic-statistics') {
-				if (hourlyStatsData && hourlyStatsData.length) renderHourlyTrafficChart(hourlyStatsData);
 				if (window.loadProtoTraffic) loadProtoTraffic();
 			} else if (id === 'tab-app-ranking' && hourlyStatsData && hourlyStatsData.length) {
 				renderHourlyAppsChart(hourlyStatsData);
@@ -1877,14 +1697,11 @@
 			</div>
 
 			<div id="tab-traffic-statistics" class="tab-body">
-				<div class="bar-chart">
-					<div id="hourly_traffic_chart" style="width:100%;height: 400px;"></div>
-				</div>
-
-				<!-- 协议分布已并入「今日流量」：两者都是今日按小时/按协议的流量拆分，
-				     合并成一个页面，避免与总流量图功能重复、还要切两个标签。 -->
-				<div id="tab-protocol" class="proto-section" style="margin-top:22px;border-top:1px solid rgba(128,128,128,.18);padding-top:16px;">
-					<div class="proto-section-title" style="font-weight:700;font-size:15px;margin-bottom:12px;">按协议拆分 · 今日流量</div>
+				<!-- 今日流量只保留一张带协议识别的柱状图：协议拆分图本身就是
+				     今日按小时的流量柱图，原来那张「上下行总量」柱图与它重复，
+				     去掉后这一页只留下面这一张带协议着色的柱子。 -->
+				<div id="tab-protocol" class="proto-section">
+					<div class="proto-section-title" style="font-weight:700;font-size:15px;margin-bottom:12px;">今日流量 · 按协议拆分（24 小时）</div>
 					<div class="proto-summary" id="proto_summary">
 						<div class="proto-sum-card total"><div class="proto-sum-label">今日协议流量</div><div class="proto-sum-value" id="proto_total">--</div></div>
 						<div class="proto-sum-card"><div class="proto-sum-label">识别协议</div><div class="proto-sum-value" id="proto_kinds">--</div></div>
@@ -2036,7 +1853,8 @@
 		border-radius: 12px;
 		padding: 10px;
 	}
-	#proto_chart { width: 100%; height: 360px; }
+	/* 「今日流量」页现在只有这一张柱状图，适当加高让 24 根协议柱更清楚 */
+	#proto_chart { width: 100%; height: 420px; }
 	.proto-side { flex: 1 1 260px; min-width: 230px; display: flex; flex-direction: column; gap: 12px; }
 	.proto-card {
 		background: rgba(128,128,128,.04);
@@ -2490,7 +2308,6 @@
 			padding: 0;
 		}
 		#app_time_chart,
-		#hourly_traffic_chart,
 		#hourly_apps_chart,
 		#history_traffic_chart {
 			height: 300px !important;

@@ -233,6 +233,14 @@ end
 local function fill_app_columns(list)
 	if type(list) ~= "table" or #list == 0 then return end
 
+	-- 端口类型线索：OUI 认不出的设备（如飞牛 NAS，管理口 5666）用 conntrack
+	-- 里观察到的特征端口补一条设备类型信号，前端据此挑设备图标。
+	local port_types = {}
+	if traffic then
+		local ok, pt = pcall(traffic.port_hints)
+		if ok and type(pt) == "table" then port_types = pt end
+	end
+
 	local by_mac = {}
 	local uj = read_json("/tmp/oaf-lite/users.json")
 	if uj and type(uj.users) == "table" then
@@ -276,6 +284,12 @@ local function fill_app_columns(list)
 			if row.app_id > 0 then
 				row.app_icon = tostring(row.app_id)
 			end
+		end
+		-- 端口类型 -> 前端图标（dev_type）。OUI 厂商 logo 仍然优先，
+		-- 这里只是给认不出厂商的设备补一条线索。
+		local pt = port_types[key]
+		if type(pt) == "table" then
+			for typ in pairs(pt) do row.dev_type = typ; break end
 		end
 		local apps = apps_by_mac[key]
 		if apps and #apps > 0 and not (type(row.applist) == "table" and #row.applist > 0) then

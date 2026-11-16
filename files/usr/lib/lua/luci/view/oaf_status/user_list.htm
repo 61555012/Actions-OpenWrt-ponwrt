@@ -1272,12 +1272,33 @@ function oafAppIconSrc(id) {
 				return 'desktop';
 			}
 
-			function buildDeviceIconHtml(name, mac, vendor) {
+			// 已人工确认过的设备：按 MAC 前缀或端口类型直接定图标，优先级最高，
+			// 比 OUI / 主机名推断更可靠。
+			//   A0:92:08:58 -> 智能插座（三台）用 IoT 线稿图标
+			//   78:2E:03:4A -> 智能手表用 watch 线稿图标
+			//   dev_type=fnos（后端由 5666 端口识别）-> 飞牛 NAS 用 fnos logo
+			function forcedDeviceIdentity(mac, dev_type) {
+				var hex = String(mac || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+				if (hex.indexOf('A0920858') === 0) {
+					return { kind: 'iot', logo: '', title: '智能插座 (IoT)' };
+				}
+				if (hex.indexOf('782E034A') === 0) {
+					return { kind: 'watch', logo: '', title: '智能手表' };
+				}
+				if (dev_type === 'fnos') {
+					return { kind: 'desktop', logo: 'fnos', title: '飞牛 NAS (fnOS)' };
+				}
+				return null;
+			}
+
+			function buildDeviceIconHtml(name, mac, vendor, dev_type) {
 				// 品牌 logo 优先；没有 logo（随机 MAC / svg 缺失）时退回设备类型，
 				// 手机、平板还是电脑靠主机名和随机 MAC 推，推不出来按电脑算。
-				var logo = ouiKeyForDevice(mac, vendor, name);
-				var kind = deviceKind(name, mac, vendor);
-				var title = vendor ? ('<%:Vendor%>: ' + vendor) : (name || mac || '');
+				var forced = forcedDeviceIdentity(mac, dev_type);
+				var logo = forced ? (forced.logo || '') : ouiKeyForDevice(mac, vendor, name);
+				var kind = forced ? forced.kind : deviceKind(name, mac, vendor);
+				var title = forced ? forced.title
+					: (vendor ? ('<%:Vendor%>: ' + vendor) : (name || mac || ''));
 				var inner = '';
 				if (DEVICE_GLYPHS[kind]) {
 					inner = '<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -1447,7 +1468,7 @@ function oafAppIconSrc(id) {
 					}
 					$tr.append(`<td class="td user-col-device">
 						<div class="user-device-info">
-							${buildDeviceIconHtml(list_display_name, mac, user_list[i].vendor)}
+							${buildDeviceIconHtml(list_display_name, mac, user_list[i].vendor, user_list[i].dev_type)}
 							<div class="user-device-text">
 								<div class="user-device-name" title="${escapeHtml(list_full_name)}">${escapeHtml(list_truncated_name)}</div>
 								<div class="user-device-mac" title="${escapeHtml(mac)}">${escapeHtml(mac)}</div>
@@ -1586,7 +1607,7 @@ function oafAppIconSrc(id) {
 						<div class="user-card" data-mac="${String(mac || '').toUpperCase()}">
 							<div class="user-card-head">
 								<div class="user-card-device">
-									${buildDeviceIconHtml(card_title, mac, user_list[i].vendor)}
+									${buildDeviceIconHtml(card_title, mac, user_list[i].vendor, user_list[i].dev_type)}
 									<div class="user-card-title-wrap">
 										<div class="user-card-title" title="${escapeHtml(card_info_line)}">${escapeHtml(card_info_line)}</div>
 										<div class="user-card-ip" title="${escapeHtml(ipText)}">${escapeHtml(ipText)}</div>
