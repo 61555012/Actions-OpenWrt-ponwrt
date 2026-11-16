@@ -37,14 +37,11 @@ CONFIG_PACKAGE_luci-lib-nixio=y
 CONFIG_PACKAGE_ucode-mod-lua=y
 CONFIG_PACKAGE_libuci-lua=y
 
-# OAF 后端（内核特征库 + oafd/appfilter）；官方 Lua 界面不编入，
-# 界面用 files/ 里的 oaf_status（见 diy-part2 里删掉 luci-app-oaf）
-CONFIG_PACKAGE_kmod-oaf=y
-CONFIG_PACKAGE_appfilter=y
-CONFIG_PACKAGE_libsqlite3=y
-CONFIG_PACKAGE_libcurl=y
+# 用户列表（oaf-lite）：自包含 C 采样器 + 本仓库的 LuCI 页面。
+# 不再需要 oaf.ko / appfilter / oafd / libsqlite3，也不再写防火墙规则。
+CONFIG_PACKAGE_luci-app-oaf-lite=y
 
-# oaf_status 的采集器：lua 解释器 + conntrack 事件流
+# oaf-lite 的采集通道：conntrack 事件流（DESTROY 兜底）+ ip -6 neigh
 CONFIG_PACKAGE_lua=y
 CONFIG_PACKAGE_conntrack=y
 
@@ -54,6 +51,8 @@ CONFIG_PACKAGE_miniupnpd-nftables=y
 # CONFIG_PACKAGE_miniupnpd-iptables is not set
 
 # 不编入
+# CONFIG_PACKAGE_kmod-oaf is not set
+# CONFIG_PACKAGE_appfilter is not set
 # CONFIG_PACKAGE_luci-app-oaf is not set
 # CONFIG_PACKAGE_luci-app-iptv is not set
 # CONFIG_PACKAGE_luci-app-appfilter is not set

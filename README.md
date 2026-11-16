@@ -10,19 +10,20 @@
 .github/workflows/update-checker.yml           # 上游更新时触发 repository_dispatch
 .config-ponwrt-full                            # 叠加层：官方基线之外要加/要关的包
 diy-ponwrt-full-1.sh                           # feeds update 前：钉住 feed 源
-diy-ponwrt-full-2.sh                           # feeds update 后：OAF、内核每流统计、PPE FIN 补丁、NPU 面板、去 dummy
+diy-ponwrt-full-2.sh                           # feeds update 后：oaf-lite、内核每流统计、PPE FIN 补丁、NPU 面板、去 dummy
 diy-ponwrt-full-3.sh                           # feeds install 后：argon v3.1.1 覆盖 feeds 旧版
+package/luci-app-oaf-lite/                     # 用户列表后端：自包含 C 采样器（编出 /usr/bin/oaf-lite）
 files/                                         # 原样合并进固件根目录
   etc/config/{network,pon,firewall,upnpd}      # 实机配置（PPPoE、光猫注册、UPnP、加速开关）
   etc/shadow                                   # root 密码
-  etc/fwxd/feature.bin                         # OAF 应用特征库
+  etc/fwxd/feature.bin                         # OAF 应用特征库（官方 FWXB，程序内解密）
   etc/apk/{config,repositories}                # 关签名校验 + PKU 软件源 6 条
-  www/luci-static/resources/oaf/app_icons/     # OAF 官方路径：562 个应用图标（oaf_status 前端复用）
-  usr/lib/lua/luci/controller/oaf_status_users.lua   # oaf_status 控制器（状态 → 用户列表）
+  etc/init.d/oaf-lite                          # 采样器服务（procd）
+  etc/config/oaf-lite                          # 采样参数（采样节奏 / 后端 / 时区）
+  www/luci-static/resources/oaf/app_icons/     # OAF 官方路径：562 个应用图标（用户列表复用）
+  usr/lib/lua/luci/controller/oaf_status_users.lua   # 控制器（状态 → 用户列表）
+  usr/lib/lua/luci/oaf_lite.lua                      # 读层：stats.json → 页面数据（含 %2C/时区处理）
   usr/lib/lua/luci/view/oaf_status/*.htm             # 用户列表 / 终端详情两页
-  usr/lib/lua/luci/oaf_traffic.lua                   # 硬件加速安全的流量口径
-  usr/lib/lua/oaf_ctstat.lua                         # conntrack 采集器（1 Hz 快照 + DESTROY 事件）
-  etc/init.d/oaf-ctstat                              # 采集器服务（procd）
   usr/share/oaf_status/vendors.json                  # OUI 厂商表（8712 前缀）
   www/luci-static/resources/oui/                     # 厂商图标识别（oui.js + 35 个 SVG + 前缀库）
   www/cgi-bin/oaf_live                               # 1 秒快车道（Lua + ubus 会话校验，8 ms）
@@ -39,9 +40,10 @@ files/                                         # 原样合并进固件根目录
 | PON / 光模块 | `kmod-airoha-xpon` + `kmod-airoha-pon-frontend` + `kmod-airoha-en7572` + `airoha-pond` / `airoha-ponctl`，全部 `=y` |
 | 2.5G 网口 | `kmod-phy-airoha-en8811h` + `airoha-en8811h-firmware`，`=y`（lan1，`2500base-x`） |
 | UPnP | `miniupnpd-nftables` + `luci-app-upnp` |
-| OAF 后端 | 官方 [destan19/OpenAppFilter](https://github.com/destan19/OpenAppFilter) 原样编译：`kmod-oaf`（特征库）+ `appfilter`（oafd，ubus `fwx`） |
-| OAF 前端 | 本仓库 `files/` 里的 `oaf_status`：**状态 → 用户列表 / 终端详情**。官方 `luci-app-oaf` 界面不再编入（目录在 diy-part2 里直接删掉） |
-| OAF 采集器 | `oaf_ctstat.lua` + `oaf-ctstat` 服务：conntrack 快照 + `conntrack -E DESTROY` 事件，硬件加速下流量仍然准（OAF 自己的 netfilter 钩子在 offload 后看不到包） |
+| 用户列表后端 | `package/luci-app-oaf-lite`：自包含 C 采样器（`/usr/bin/oaf-lite`）。**不再编 `kmod-oaf` / `appfilter` / `oafd`**，不写防火墙规则、不占内核模块 |
+| 用户列表前端 | `files/` 里的 `oaf_status`：**状态 → 用户列表 / 终端详情**，1 秒快车道走 `www/cgi-bin/oaf_live` |
+| L7 标签 | 抓每条流的前几个包：TLS ClientHello SNI / HTTP Host / QUIC / DNS / FAILED / OTHER，对照 `feature.bin` 归类 |
+| 流量口径 | conntrack 差分 + DESTROY 事件兜底；AN7581 PPE 每流统计回写后照样计数 |
 | 其他插件 | `luci-app-pon`（上游 pbs05）、`luci-app-airoha-npu`（[luanmuc](https://github.com/luanmuc/luci-app-airoha-npu)）、`argon v3.1.1` |
 | 不编入 | `luci-app-oaf`（官方界面）、`luci-app-iptv`、mosdns 整套、`kmod-dummy`；无线栈 `kmod-mac80211` / `kmod-cfg80211` / `kmod-mt76-core` / `-connac` / `wpad-openssl` / `hostapd-common` / `wifi-scripts` / `wireless-regdb`（`wpad` 是 kconfig choice，`defconfig` 会挑一个成员并带回 `hostapd-common`，校验只提示不判失败） |
 | OMCI 兼容性 | `omcc_version` 出厂默认 `0x86` |
@@ -107,6 +109,36 @@ uci commit firewall && /etc/init.d/firewall reload
 
 该页来自 luci-plugins 框架，本固件不用它，点进去只有空表。`diy-ponwrt-full-2.sh`
 删视图 `view/system/plugins.js` 并从 `luci-mod-system.json` 摘掉 `admin/system/plugins` 菜单项。
+
+#### 4.3 用户列表后端：oaf-lite（不再有 `oaf.ko`）
+
+早期版本把官方 [OpenAppFilter](https://github.com/destan19/OpenAppFilter) 原样编进来
+（`kmod-oaf` + `appfilter`/`oafd`），再配一份 `oaf_ctstat.lua` 采集器。两个问题：
+
+- `oaf.ko` 的 netfilter 钩子在 PPE 卸载后看不到包，硬件加速一开就统计不全；
+- 内核模块 + oafd + 规则管理常驻，空闲也要几 MB 内存和稳定 CPU。
+
+现在换成 `package/luci-app-oaf-lite`：单进程纯用户态 C 程序，**没有内核模块、没有 ubus 服务、
+不写防火墙规则、不落 flash**。
+
+| 项 | 做法 |
+|---|---|
+| L7 标签 | AF_PACKET 抓 `br-lan` 上每条流的**前几个包**（BPF 只放行 TCP SYN / 80·443·8080·8443 / UDP 53·443·5353·853），解析 TLS SNI、HTTP Host、QUIC、DNS，再按 `feature.bin` 归类 |
+| 字节数 | 每秒读 `/proc/net/nf_conntrack` 差分；短连接靠 `conntrack -E DESTROY` 兜底（无基线的流全量记账，2 GiB 上限防呆） |
+| PPE 卸载 | 依赖驱动把每流计数回写进 conntrack（配 4.1 的 FIN 老化 30s），回写是覆盖式累计，不会翻倍 |
+| 采样节奏 | 有人看页面时 1 秒一拍，无人时 3 秒一拍；**记账固定在 1 秒**（降频会整段丢短连接） |
+| 实测量级 | 空闲 CPU ≈ 2~3%、RSS ≈ 3.3 MB；受控 40 MB 下载记账误差 0.2% 以内 |
+
+历史上踩过、已经修掉的三处坑，改这块代码前值得先看：
+
+1. **IPv6 两套写法**：`/proc/net/nf_conntrack` 是补零全写（`2409:...:0010:0000:...`），
+   `conntrack -E` 的 DESTROY 是压缩写（`2409:...:10::...`）。流 key 若直接拿原始文本拼，
+   同一条连接会变成两条：快照记一遍，销毁时"找不到基线"再全量记一遍 → **IPv6 流量正好翻倍**。
+   现在四元组统一走 `ip_key()/expand6()` 归一。
+2. **开机前就存在的长连接**：首次快照看不到（IPv6 邻居映射晚几十秒建立），销毁时整段历史
+   记成"刚刚发生的流量"。启动时先扫一遍 conntrack 预置基线（`seeded N baselines`）。
+3. **速率假尖峰**：PPE 条目回收会把积压计数一次性刷进 conntrack，用"每拍增量 ÷ 本拍 dt"
+   会算出几百 MB/s。改成窗口首尾累计差 ÷ 真实时长。
 
 ### 5. OMCC 版本 = 0x86
 

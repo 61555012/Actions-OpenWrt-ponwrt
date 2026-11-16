@@ -12,7 +12,7 @@ local ok_builtin, builtin_app_names = pcall(require, "luci.oaf_app_names")
 -- OAF 自己的计数走 netfilter 钩子，硬件加速开启后大部分包不过协议栈，
 -- 速率就会长期是 0。list 上的 V4/V6 分行、厂商名都来自 oaf-flowd 的
 -- 快照；模块或采样器不在时 merge_* 什么都不做，页面退回原样。
-local ok_tr, traffic = pcall(require, "luci.oaf_traffic")
+local ok_tr, traffic = pcall(require, "luci.oaf_lite")
 if not ok_tr then traffic = nil end
 
 local SECONDS_PER_DAY = 86400
@@ -21,13 +21,6 @@ local SECONDS_PER_DAY = 86400
 -- id>0 但内置名表里没登记，对用户是同一件事，不把 App12 这类内部编号
 -- 抛到界面上。
 local UNKNOWN_NAME = "未识别"
-
--- OAF 的客户端统计目录：fwx(oafd) 的 base_data_path 就指向 tmpfs 上的
--- /tmp/oaf（旧版本叫 /tmp/fwx），这里只认这两处，没有外挂分区路径。
-local DATA_ROOTS = {
-	"/tmp/oaf/client_data",
-	"/tmp/fwx/client_data",
-}
 
 function index()
 	entry({"admin", "status", "oaf_users"},
@@ -50,12 +43,107 @@ function index()
 	entry({"admin", "status", "oaf_users", "api", "app_traffic"},           call("api_app_traffic"),           nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "set_nickname"},          call("api_set_nickname"),          nil).leaf = true
 	entry({"admin", "status", "oaf_users", "api", "history_traffic"},       call("api_history_traffic"),       nil).leaf = true
+	entry({"admin", "status", "oaf_users", "api", "proto_traffic"},         call("api_proto_traffic"),         nil).leaf = true
+	entry({"admin", "status", "oaf_users", "api", "sampler_info"},          call("api_sampler_info"),          nil).leaf = true
 end
 
 -- ---------------------------------------------------------------- 基础工具
 
+-- oaf-lite runs without oafd and without oaf.ko: all APIs the page asks for
+-- are served from the C sampler's JSON snapshots in /tmp/oaf-lite.
+-- ubus is kept only as a fallback for boxes that also run the original
+-- appfilter package, so this plugin can coexist with a stock OAF install.
+local LITE_DIR = "/tmp/oaf-lite"
+local NICKNAME_FILE = "/etc/oaf-lite/nicknames.json"
+
+local function lite_json(path)
+	local f = io.open(path, "r")
+	if not f then return nil end
+	local body = f:read("*a")
+	f:close()
+	if not body or body == "" then return nil end
+	local ok, obj = pcall(jsonc.parse, body)
+	if ok and type(obj) == "table" then return obj end
+	return nil
+end
+
+local function lite_user(mac)
+	local u = lite_json(LITE_DIR .. "/users.json")
+	if not (u and type(u.users) == "table") then return nil end
+	local want = tostring(mac or ""):upper()
+	for _, row in ipairs(u.users) do
+		if type(row) == "table" and tostring(row.mac or ""):upper() == want then
+			return row
+		end
+	end
+	return nil
+end
+
 local function fwx(api, data)
-	return utl.ubus("fwx", "common", { api = api, data = data or {} })
+	data = data or {}
+	local mac = tostring(data.mac or ""):gsub("^%s+", ""):gsub("%s+$", "")
+
+	if api == "get_all_users" then
+		local u = lite_json(LITE_DIR .. "/users.json")
+		local list = (u and type(u.users) == "table") and u.users or {}
+		local nicks = lite_json(NICKNAME_FILE) or {}
+		for _, row in ipairs(list) do
+			if type(row) == "table" then
+				local nm = nicks[tostring(row.mac or ""):upper()]
+				if nm then row.nickname = nm end
+			end
+		end
+		return { code = 2000, data = { list = list, total_num = #list } }
+
+	elseif api == "get_user_basic_info" then
+		local row = lite_user(mac)
+		if not row then return { code = 4000 } end
+		local out = {}
+		for k, v in pairs(row) do out[k] = v end
+		local nicks = lite_json(NICKNAME_FILE) or {}
+		out.nickname = nicks[mac:upper()] or out.nickname or ""
+		out.ipv6 = out.ipv6 or out.ip6 or ""
+		return { code = 2000, data = out }
+
+	elseif api == "get_system_base_info" then
+		local support = 0
+		if traffic then
+			local ok, s = pcall(traffic.wireless_support)
+			if ok then support = s and 1 or 0 end
+		end
+		return { code = 2000, data = {
+			wireless_support = support,
+			user_session_enable = 1,
+		} }
+
+	elseif api == "class_list" then
+		-- #class sections of the feature library, exported by the sampler at
+		-- start-up. An edited feature.cfg therefore shows up here at once.
+		local meta = lite_json(LITE_DIR .. "/classes.json")
+		return { code = 2000, data = {
+			class_list = (meta and type(meta.class_list) == "table")
+				and meta.class_list or {}
+		} }
+
+	elseif api == "set_nickname" then
+		local nicks = lite_json(NICKNAME_FILE) or {}
+		nicks[mac:upper()] = tostring(data.nickname or "")
+		local body = jsonc.stringify(nicks)
+		local f = io.open(NICKNAME_FILE, "w")
+		if not f then return { code = 4000 } end
+		f:write(body or "{}")
+		f:close()
+		return { code = 2000, data = {} }
+
+	elseif api == "get_hourly_top_apps" or api == "dev_visit_list" then
+		-- Hourly traffic, APP charts and visit records all come from the
+		-- sampler's hourly.json / apps.json through luci.oaf_lite instead.
+		-- Returning 4000 here makes the controller use those read-layer paths.
+		return { code = 4000 }
+	end
+
+	local resp = utl.ubus("fwx", "common", { api = api, data = data })
+	return resp or { code = 4000 }
 end
 
 local function normalize_mac(mac)
@@ -127,6 +215,75 @@ local function sort_users_by_activity(list)
 	return list
 end
 
+-- ---------------------------------------------------------------- 应用列补齐
+-- 没有 fwx/oafd 时，列表原来的兜底只填 mac/ip/在线状态，APP 与 URL 两列整列
+-- 是 "--"。oaf-lite 自己已经把「最近访问的域名」和「按字节排行的应用」写进
+-- /tmp/oaf-lite/{users,apps}.json，这里读回来补到行上，前端不用区分来源。
+local function read_json(path)
+	local f = io.open(path, "r")
+	if not f then return nil end
+	local body = f:read("*a")
+	f:close()
+	if not body or body == "" then return nil end
+	local ok, d = pcall(jsonc.parse, body)
+	if not ok or type(d) ~= "table" then return nil end
+	return d
+end
+
+local function fill_app_columns(list)
+	if type(list) ~= "table" or #list == 0 then return end
+
+	local by_mac = {}
+	local uj = read_json("/tmp/oaf-lite/users.json")
+	if uj and type(uj.users) == "table" then
+		for _, u in ipairs(uj.users) do
+			if type(u) == "table" and u.mac then
+				by_mac[tostring(u.mac):upper()] = u
+			end
+		end
+	end
+
+	local apps_by_mac = {}
+	local aj = read_json("/tmp/oaf-lite/apps.json")
+	if aj and type(aj.clients) == "table" then
+		for mac, arr in pairs(aj.clients) do
+			if type(arr) == "table" then
+				local out = {}
+				for _, a in ipairs(arr) do
+					local id = tonumber(a.id) or 0
+					if type(a) == "table" and id > 0 then
+						out[#out + 1] = {
+							id    = tostring(id),
+							name  = a.name or "",
+							bytes = (tonumber(a.up) or 0) + (tonumber(a.down) or 0),
+						}
+					end
+				end
+				table.sort(out, function(x, y) return x.bytes > y.bytes end)
+				while #out > 5 do table.remove(out) end
+				apps_by_mac[tostring(mac):upper()] = out
+			end
+		end
+	end
+
+	for _, row in ipairs(list) do
+		local key = tostring(row.mac or ""):upper()
+		local u = by_mac[key]
+		if u then
+			row.app_id = tonumber(u.app_id) or 0
+			row.app    = u.app or ""
+			row.url    = u.url or ""
+			if row.app_id > 0 then
+				row.app_icon = tostring(row.app_id)
+			end
+		end
+		local apps = apps_by_mac[key]
+		if apps and #apps > 0 and not (type(row.applist) == "table" and #row.applist > 0) then
+			row.applist = apps
+		end
+	end
+end
+
 function api_get_all_users()
 	local page      = tonumber(luci.http.formvalue("page")) or 1
 	local page_size = tonumber(luci.http.formvalue("page_size")) or 20
@@ -150,6 +307,7 @@ function api_get_all_users()
 		if override_usage_times and #list > 0 then
 			pcall(override_usage_times, list)
 		end
+		pcall(fill_app_columns, list)
 		sort_users_by_activity(list)
 
 		local total = num(resp.data.total_num)
@@ -200,6 +358,7 @@ function api_get_all_users()
 		if total > 0 then
 			if traffic then pcall(traffic.merge_list, list) end
 			if override_usage_times then pcall(override_usage_times, list) end
+			pcall(fill_app_columns, list)
 			sort_users_by_activity(list)
 		end
 		local total_page = math.max(1, math.ceil(total / page_size))
@@ -291,12 +450,13 @@ end
 
 -- ---------------------------------------------------------------- 终端详情
 
--- 名字只能从 fwx 拿到（它的库里只存 appid，名字是它跟云端问的），所以学到
--- 一次就落盘。写在 overlay 的 /etc/oaf/data 上是为了跨重启累积：某个 app
--- 今天出现过一次，以后半年前的记录也能显示中文名。
+-- 权威名字表由 oaf-lite 直接从明文特征库导出到 tmpfs（app_names.json）：
+-- 用户改了 feature.cfg，页面立刻跟着变。第一个路径在 overlay 上，是
+-- 「学到一次就落盘」的增量保存位置，跨重启累积；读的时候 tmpfs 那份
+-- 后加载、覆盖同 id，保证特征库始终是权威。
 local APP_NAME_FILES = {
-	"/etc/oaf/data/app_names.json",
-	"/tmp/oaf-flow/app_names.json",
+	"/etc/oaf-lite/app_names.json",
+	"/tmp/oaf-lite/app_names.json",
 }
 
 local function read_json_file(path)
@@ -354,20 +514,15 @@ local function save_app_names(map)
 	end
 end
 
--- 访问记录只保留最近 30 天。
---
--- fwx 的 dev_visit_list 只认「今天」：date 参数被忽略，total_num 就是当天
--- 的条数，而它的库 /tmp/oaf/client.db 在 tmpfs 上，重启就没了。所以 30 天
--- 的记录由 oaf-flowd 直接读 client.db 的 app_visit_record 表，滚动写到
--- /etc/oaf/data/visits.json。这里读那份文件，再用 fwx 的当天
--- 列表补齐：它带应用名（文件里只有 appid），也能把 flowd 还没同步到的
--- 最后十几秒补上。
+-- 访问记录只保留最近 30 天。主数据源是采样器的 apps.json（见
+-- api_dev_visit_list）：每个应用的小时活跃秒数 + 字节，按 2 KiB 门槛过滤。
+-- 下面这份落盘文件是可选的「历史会话」兜底，供应用活跃数据还没攒够时
+-- 的饼图/柱状图使用；没有 oafd，也没有 client.db。
 local VISIT_KEEP_SECONDS = 30 * SECONDS_PER_DAY
--- 只认 flowd 自己的 /etc/oaf/data/visits.json，不做任何跨固件的历史兜底：
--- 备份分区刷机不擦，读旧文件会把上一任安装的 30 天记录原样带回来
--- （用户以为刷机从 0 开始，列表里却全是旧机器的历史）。
+-- 写在本插件自己的 overlay 目录下，不读其它固件的 /etc/oaf/data，
+-- 避免刷机后把上一任安装的 30 天历史带回来。
 local VISIT_STORE_FILES = {
-	"/etc/oaf/data/visits.json",
+	"/etc/oaf-lite/visits.json",
 }
 
 local function load_visit_store()
@@ -463,11 +618,46 @@ local function merged_sessions(target, cutoff)
 	return all, meta, (stored ~= nil)
 end
 
--- 本地时区今天的 0 点（访问记录的会话时间都按本地时间落库）
+-- 「今天 0 点」必须按采样器用的时区算。
+-- 采样器的日文件 /tmp/oaf-lite/day/YYYY-MM-DD.json 和小时桶都是按
+-- /etc/config/oaf-lite 的 option tz（默认 8）切的；这里原来用 os.date/os.time
+-- 走系统时区，本机 /etc/TZ 是 GMT0，于是「今天」比采样器晚 8 小时开始，
+-- 访问记录、历史日期的边界全部错位。
+-- 采样器模块提供了一套与时区无关的实现；模块不在时退回原来的写法。
+local function tz_hours()
+	if traffic and traffic.tz_hours then
+		local ok, v = pcall(traffic.tz_hours)
+		if ok and tonumber(v) then return tonumber(v) end
+	end
+	return 8
+end
+
+local function tz_seconds() return tz_hours() * 3600 end
+
+local function lt_date(fmt, ts)
+	return os.date("!" .. fmt, (ts or os.time()) + tz_seconds())
+end
+
+local function lt_hour(ts)
+	local s = (ts or os.time()) + tz_seconds()
+	return math.floor((s % 86400) / 3600)
+end
+
 local function today_start()
-	local t = os.date("*t")
-	t.hour, t.min, t.sec = 0, 0, 0
-	return os.time(t)
+	local off = tz_seconds()
+	return math.floor((os.time() + off) / 86400) * 86400 - off
+end
+
+-- 配置时区的年月日 -> 真实 epoch（与时区无关的民用历算法）
+local function lt_epoch(y, mo, d)
+	if mo <= 2 then y = y - 1 end
+	local era = math.floor(y / 400)
+	local yoe = y - era * 400
+	local mp  = (mo + 9) % 12
+	local doy = math.floor((153 * mp + 2) / 5) + d - 1
+	local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+	local days = era * 146097 + doe - 719468
+	return days * 86400 - tz_seconds()
 end
 
 -- 设备级「上网时长」：把会话的 [开始, 结束] 区间合并去重后求和。
@@ -789,18 +979,17 @@ function api_get_hourly_stats(mac)
 			local tt = tonumber(rec.tt) or span
 			if span <= 0 then
 				-- 没有跨度可言（瞬时记录），整段记入开始小时
-				add_app_hour(tonumber(os.date("*t", ft).hour) or 0, rec, tt)
+				add_app_hour(lt_hour(ft), rec, tt)
 			else
 				-- 切出与每个小时重叠的段，按时长占比分摊 tt，取整余数记到
-				-- 最后一段，保证合计守恒
+				-- 最后一段，保证合计守恒。小时边界按配置时区对齐采样器的桶。
 				local segs = {}
+				local off = tz_seconds()
 				local cur = ft
 				while cur < lt do
-					local t = os.date("*t", cur)
-					local hb = os.time({ year = t.year, month = t.month,
-						day = t.day, hour = t.hour, min = 0, sec = 0 })
+					local hb = math.floor((cur + off) / 3600) * 3600 - off
 					local seg = (lt < hb + 3600) and lt or (hb + 3600)
-					segs[#segs + 1] = { hour = t.hour, ov = seg - cur }
+					segs[#segs + 1] = { hour = lt_hour(cur), ov = seg - cur }
 					cur = seg
 				end
 				local allocated = 0
@@ -920,7 +1109,7 @@ function api_app_traffic(mac)
 		if id == 0 then
 			a.name = "未识别"
 		else
-			a.name = names[tostring(id)] or nil
+			a.name = names[tostring(id)] or a.name or nil
 		end
 	end
 	json_out({ mac = target, apps = apps })
@@ -941,59 +1130,21 @@ function api_set_nickname()
 end
 
 -- ---------------------------------------------------------------- 历史流量
---
--- 数据来源改成 oaf-flowd 落盘的日汇总：
---   /etc/oaf/data/day/YYYY-MM-DD.json   { clients: [ { mac, day_up, day_down, ... } ] }
--- 今天的文件也是它在实时更新，所以今天和以前用同一套读法，不必再走 ubus。
---
--- 为什么不走 ubus：get_hourly_top_apps 会把 file_json 的子对象交给 data_obj 后
--- 又 put 掉父对象，oafd 会 use-after-free 崩掉（实测每调一次 oafd 就被 procd
--- 重启一次，当天的计数器跟着清零）。历史页面固定看 30 天，一天一次调用就会
--- 反复踩这个坑，索性整条链路都不碰它。
+-- 日汇总由 oaf-lite 的采样器写在同一目录：
+--   /tmp/oaf-lite/day/YYYY-MM-DD.json
+--   { clients = [ { mac, day_up, day_down, hours = [...] } ], apps = {...} }
+-- 今天的文件也在实时更新，所以今天和历史用同一套读法，全程不碰 ubus/oafd。
+-- 目录在 tmpfs 上：重启当天从 0 重新累计，本次开机期间的历史天文件保留。
+local LITE_DAY_DIR = LITE_DIR .. "/day"
 
--- 日汇总固定写在 overlay 的 /etc/oaf/data 下（由 init 脚本预建 day/ mon/）。
-local OAF_FLOW_DIRS = { "/etc/oaf/data" }
-
-local _flow_day_dir
-
-local function flow_day_dir()
-	if _flow_day_dir then return _flow_day_dir end
-	for _, d in ipairs(OAF_FLOW_DIRS) do
-		if fs.access(d .. "/day/") then
-			_flow_day_dir = d .. "/day"
-			return _flow_day_dir
-		end
-	end
-	_flow_day_dir = OAF_FLOW_DIRS[#OAF_FLOW_DIRS] .. "/day"
-	return _flow_day_dir
-end
-
-local function data_root()
-	for _, p in ipairs(DATA_ROOTS) do
-		if fs.access(p .. "/") then return p end
-	end
-	return DATA_ROOTS[1]
-end
-
-local function sum_hourly(hourly)
-	local up, down = 0, 0
-	if type(hourly) ~= "table" then return up, down end
-	for _, h in ipairs(hourly) do
-		if type(h) == "table" and type(h.traffic) == "table" then
-			up   = up   + (tonumber(h.traffic.up_bytes)   or 0)
-			down = down + (tonumber(h.traffic.down_bytes) or 0)
-		end
-	end
-	return up, down
-end
-
--- flowd 的日汇总文件（今天和历史同一个格式）
 local function read_flow_day(mac_addr, ts)
-	local day = os.date("%Y-%m-%d", ts)
-	local raw = fs.readfile(string.format("%s/%s.json", flow_day_dir(), day))
+	-- 采样器的日文件按 option tz 切日，取日期也必须用同一个时区，
+	-- 否则本地时间 0~8 点之间会去翻前一天的文件，今日流量显示成 0。
+	local day = lt_date("%Y-%m-%d", ts)
+	local raw = fs.readfile(string.format("%s/%s.json", LITE_DAY_DIR, day))
 	if not raw or raw == "" then return nil end
-	local obj = jsonc.parse(raw)
-	if type(obj) ~= "table" or type(obj.clients) ~= "table" then return nil end
+	local ok, obj = pcall(jsonc.parse, raw)
+	if not ok or type(obj) ~= "table" or type(obj.clients) ~= "table" then return nil end
 	local want = mac_addr:lower()
 	for _, c in ipairs(obj.clients) do
 		if type(c) == "table" then
@@ -1009,27 +1160,10 @@ end
 local function read_day_file(mac_addr, ts)
 	local up, down = read_flow_day(mac_addr, ts)
 	if up then return up, down, true end
-
-	-- 兜底：老布局（oafd 的 client_data）
-	local root  = data_root()
-	local day   = os.date("%Y-%m-%d", ts)
-	local base  = mac_addr:gsub(":", "_")
-
-	-- 目录名是 MAC 小写，个别版本写过大写，两种都试
-	for _, name in ipairs({ base:lower(), base:upper() }) do
-		local raw = fs.readfile(string.format("%s/%s/stats/hourly_%s.json", root, name, day))
-		if raw and raw ~= "" then
-			local obj = jsonc.parse(raw)
-			if type(obj) == "table" and type(obj.hourly_stats) == "table" then
-				local up, down = sum_hourly(obj.hourly_stats)
-				return up, down, true
-			end
-		end
-	end
 	return 0, 0, false
 end
 
--- 今天和以前都读 flowd 的日文件，is_today 只是保留签名
+-- 今天和以前都读采样器的日文件，is_today 只是保留签名
 local function day_traffic(mac_addr, ts, is_today)
 	return read_day_file(mac_addr, ts)
 end
@@ -1063,7 +1197,7 @@ function api_history_traffic(mac)
 			json_out({ code = 1, message = "invalid date", days = {}, summary = { up_bytes = 0, down_bytes = 0, total_bytes = 0 } })
 			return
 		end
-		local ts = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(dd), hour = 0, min = 0, sec = 0 })
+		local ts = lt_epoch(tonumber(y), tonumber(m), tonumber(dd))
 		if not ts or ts > today then
 			json_out({ code = 1, message = "future date", days = {}, summary = { up_bytes = 0, down_bytes = 0, total_bytes = 0 } })
 			return
@@ -1081,7 +1215,7 @@ function api_history_traffic(mac)
 		total_down = total_down + down
 		days[#days + 1] = {
 			date        = ts,
-			date_str    = os.date("%Y-%m-%d", ts),
+			date_str    = lt_date("%Y-%m-%d", ts),
 			up_bytes    = up,
 			down_bytes  = down,
 			total_bytes = up + down,
@@ -1100,4 +1234,27 @@ function api_history_traffic(mac)
 			total_bytes = total_up + total_down
 		}
 	})
+end
+
+-- ---------------------------------------------------------------- 协议分布
+-- 六类协议图例（TLS / HTTP / QUIC / FAILED / DNS / OTHER）。数字来自
+-- 采样器的 proto.json：每条 conntrack 流在首包阶段被打上协议标签，
+-- 之后即使被 HNAT/PPE 接管，字节仍按这个标签累计。
+function api_proto_traffic(mac)
+	local target = mac_arg(mac)
+	if not traffic then json_out({ order = {}, list = {}, lan = {} }); return end
+	local ok, d = pcall(traffic.proto_traffic, target)
+	if not ok or type(d) ~= "table" then
+		json_out({ order = {}, list = {}, lan = {} })
+		return
+	end
+	json_out(d)
+end
+
+-- 采样器状态：给页面页脚/排障用，也方便确认特征库是否真的加载了。
+function api_sampler_info()
+	if not traffic then json_out({}); return end
+	local ok, d = pcall(traffic.feature_info)
+	if not ok or type(d) ~= "table" then json_out({}); return end
+	json_out(d)
 end

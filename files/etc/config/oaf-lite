@@ -1,0 +1,16 @@
+config oaf-lite 'main'
+	# Bridge whose first packets are sampled for L7 labels. Hardware offload
+	# removes later packets from the CPU; only the first OL_MAX_FLOW_PKTS are
+	# ever parsed, so loss only affects identification, never byte counters.
+	option lan_if 'br-lan'
+	# Official OAF v4.0 library (FWXB, decrypted in-process). A plaintext
+	# feature.cfg is accepted too — drop it here and point option to it.
+	option feature '/etc/fwxd/feature.bin'
+	# conntrack = open PPE / flowtable writeback (AN7581, MTK mtk_ppe)
+	# hnat-aggr = additionally poll "hw_nat -A AG" for vendor closed HNAT
+	option backend 'auto'
+	option hnat_aggr '0'
+	# Beijing time for day/hour buckets, fast/slow sampling seconds
+	option tz '8'
+	option fast '1'
+	option slow '3'

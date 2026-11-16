@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+# oaf-lite: self-contained user-list sampler (no oaf.ko, no oafd, no rule_manager)
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	config_load oaf-lite
+	config_get lan_if   main lan_if   "br-lan"
+	config_get feature  main feature  "/etc/fwxd/feature.bin"
+	config_get tz       main tz       "8"
+	config_get fast     main fast     "1"
+	config_get slow     main slow     "3"
+	config_get backend  main backend  "auto"
+	config_get hnat     main hnat_aggr "0"
+
+	# 官方 FWXB 库优先（仓库自带）；明文 feature.cfg 若自己放了也能用
+	[ -f "$feature" ] || feature="/etc/fwxd/feature.cfg"
+	[ -f "$feature" ] || {
+		logger -t oaf-lite "feature library missing, daemon not started"
+		return 1
+	}
+	[ "$hnat" = "1" ] && backend="hnat-aggr"
+	[ "$backend" = "auto" ] && backend="conntrack"
+
+	mkdir -p /tmp/oaf-lite/day /etc/oaf-lite
+	: > /tmp/oaf-lite/watched
+
+	procd_open_instance
+	procd_set_param command /usr/bin/oaf-lite \
+		-i "$lan_if" -f "$feature" -b "$backend" \
+		-T "$tz" -s "$fast" -S "$slow" \
+		-d /tmp/oaf-lite
+	procd_set_param respawn 3600 5 20
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# procd tracks the daemon itself; the DESTROY feed is a child of it
+	# and is closed by acct_close() on SIGTERM.
+	:
+}
+
+service_triggers() {
+	procd_add_reload_trigger "oaf-lite"
+}

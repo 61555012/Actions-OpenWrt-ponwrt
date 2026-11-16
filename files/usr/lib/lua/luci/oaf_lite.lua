@@ -18,19 +18,79 @@
 
 local jsonc = require "luci.jsonc"
 
-local STATS  = "/tmp/oaf-flow/stats.json"
-local HOURLY = "/tmp/oaf-flow/hourly.json"
+local STATS  = "/tmp/oaf-lite/stats.json"
+local HOURLY = "/tmp/oaf-lite/hourly.json"
 -- 厂商表按顺序探测：旧的 tmpfs 文件是早期手工转换的（整条 MAC 或
 -- "04:7C:16" 形式的前缀做键，重启就丢）；usr/share 下是随插件安装的
 -- 全量平面表（8712 个 OUI 前缀，6 位去冒号十六进制做键），刷机即有。
 local VENDOR_FILES = {
 	"/usr/share/oaf_status/vendors.json",
-	"/tmp/oaf-flow/vendors.json",
+	"/tmp/oaf-lite/vendors.json",
 }
-local WATCH  = "/tmp/oaf-flow/watched"
+local WATCH  = "/tmp/oaf-lite/watched"
 local STALE  = 45   -- a snapshot older than this means oaf-flowd is gone
 
 local M = {}
+
+-- ------------------------------------------------------------------ 时区对齐
+-- 采样器 oaf-lite 的日/小时桶不是按系统时区分的，而是按 /etc/config/oaf-lite
+-- 里的 option tz（默认 8 = 北京时间）算：它用 gmtime(ts + tz*3600) 落桶。
+-- 而本模块和控制器里的 os.date/os.time 走的是系统时区——这台机器上
+-- /etc/TZ 是 GMT0，于是两边差整整 8 小时：
+--   * 详情页小时图里 APP 时长画在 -8 的格子里，流量曲线却在正确格子；
+--   * 访问记录的「开始/最后访问」等于午夜少算 8 小时，看起来完全不是真实时间；
+--   * 历史流量的「今天」边界和 day/*.json 的切日点对不上。
+-- 所以凡是要跟采样器对齐的时间计算都必须走下面这几个函数，全部用整数运算，
+-- 不依赖系统 TZ（本机 TZ 无论是 UTC 还是 CST，结果都一样）。
+local TZ_CACHE
+function M.tz_hours()
+	if TZ_CACHE then return TZ_CACHE end
+	local tz = 8
+	local f = io.open("/etc/config/oaf-lite", "r")
+	if f then
+		local raw = f:read("*a") or ""
+		f:close()
+		local v = raw:match("option%s+tz%s+'([^']*)'") or raw:match("option%s+tz%s+(%S+)")
+		tz = tonumber(v) or 8
+	end
+	TZ_CACHE = tz
+	return tz
+end
+
+function M.tz_seconds()
+	return M.tz_hours() * 3600
+end
+
+-- 按配置时区格式化的 os.date（"!" 强制走 UTC，再手动加偏移）
+function M.local_date(fmt, ts)
+	return os.date("!" .. fmt, (ts or os.time()) + M.tz_seconds())
+end
+
+-- 按配置时区的小时数 0..23，与采样器的 hour_idx() 完全一致
+function M.local_hour(ts)
+	local s = (ts or os.time()) + M.tz_seconds()
+	return math.floor((s % 86400) / 3600)
+end
+
+-- 按配置时区的「今天 0 点」epoch
+function M.local_midnight(ts)
+	local off = M.tz_seconds()
+	local s = (ts or os.time()) + off
+	return math.floor(s / 86400) * 86400 - off
+end
+
+-- 由「配置时区的年月日时分秒」反推真实 epoch（与时区无关的民用历算法）
+function M.local_epoch(y, mo, d, hh, mi, ss)
+	if mo <= 2 then y = y - 1 end
+	local era = math.floor(y / 400)
+	local yoe = y - era * 400
+	local mp  = (mo + 9) % 12
+	local doy = math.floor((153 * mp + 2) / 5) + d - 1
+	local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+	local days = era * 146097 + doe - 719468
+	return days * 86400 + (hh or 0) * 3600 + (mi or 0) * 60 + (ss or 0)
+	       - M.tz_seconds()
+end
 
 local snap, snap_at = nil, 0
 local idx, idx_src = nil, nil
@@ -43,7 +103,7 @@ local touched_at = 0
 -- 1 秒一次的快通道里十个请求只有一个真的去扫。
 local CONNTRACK = "/proc/net/nf_conntrack"
 local ARP       = "/proc/net/arp"
-local CONNCACHE = "/tmp/oaf-flow/conn6.txt"
+local CONNCACHE = "/tmp/oaf-lite/conn6.txt"
 local CONN_TTL  = 10
 local conn4, conn6, conn_at = nil, nil, 0
 
@@ -244,7 +304,7 @@ end
 -- 9 秒是能压平阶梯的最小窗口：比 12 秒跟手（起步/收尾各快 3 秒），
 -- 代价是瞬时波动比 12 秒略大。
 -- LuCI 每次请求都是新进程，历史必须落文件；写用 rename 保证原子。
-local RATEFILE = "/tmp/oaf-flow/rate6.txt"
+local RATEFILE = "/tmp/oaf-lite/rate6.txt"
 local RATE_WIN = 9
 local RATE_GAP = 20
 
@@ -425,7 +485,7 @@ end
 -- 的 day_up/day_down。fwx 的小时流量挂在 netfilter 钩子上：oafd 重启就
 -- 清零（今天 09:27 重启后柱状图只剩 1.5MB，而设备实际下行 154M），
 -- 硬件卸载的流量也记不全，所以详情页的今日流量柱状图改用这里的数据。
-local HOURLY = "/tmp/oaf-flow/hourly.json"
+local HOURLY = "/tmp/oaf-lite/hourly.json"
 
 -- whole-LAN picture: today's bytes and the current speed, in bytes
 function M.totals()
@@ -477,11 +537,12 @@ function M.client_hours(mac)
 	return nil
 end
 
--- daily totals from oaf-flowd's own day files: [[date, up, down], ...], oldest
--- first. Empty when the directory is missing.
+-- 日汇总来自 oaf-lite 采样器自己的 /tmp/oaf-lite/day/YYYY-MM-DD.json，
+--  oldest first。目录不存在（采样器没跑）时返回空表。
+local DAYDIR = "/tmp/oaf-lite/day"
 function M.days(limit)
 	limit = limit or 30
-	local p = io.popen("ls -1 /etc/oaf/data/day 2>/dev/null | sort | tail -n " .. tonumber(limit))
+	local p = io.popen("ls -1 " .. DAYDIR .. " 2>/dev/null | sort | tail -n " .. tonumber(limit))
 	if not p then
 		return {}
 	end
@@ -489,7 +550,7 @@ function M.days(limit)
 	for name in p:lines() do
 		local date = name:match("^(%d%d%d%d%-%d%d%-%d%d)%.json$")
 		if date then
-			local f = read_json("/etc/oaf/data/day/" .. name)
+			local f = read_json(DAYDIR .. "/" .. name)
 			if f then
 				local up, down = 0, 0
 				for _, c in ipairs(f.clients or {}) do
@@ -718,15 +779,20 @@ function M.merge_user(u)
 	if v then
 		u.vendor = v
 	end
+	local c = M.client(u.mac)
+	-- /proc/net/af_client only exists on boxes with oaf.ko. oaf-lite has no
+	-- kernel module, so stats.json's own ip6 field is the primary source.
 	local ip6 = M.ip6(u.mac)
-	if ip6 then
+	if (not ip6 or ip6 == "") and c and c.ip6 and c.ip6 ~= "" then
+		ip6 = c.ip6
+	end
+	if ip6 and ip6 ~= "" then
 		-- two names for the same address: the list draws its own second line,
-		-- the detail page already has a field called ipv6 from fwx, and both
-		-- should agree on which of the device's addresses that is
+		-- the detail page already has a field called ipv6, and both should
+		-- agree on which of the device's addresses that is
 		u.ip6 = ip6
 		u.ipv6 = ip6
 	end
-	local c = M.client(u.mac)
 	if not c then
 		return u
 	end
@@ -793,7 +859,7 @@ end
 -- per-app stats come from the netfilter hook, so they stop the moment a flow
 -- is offloaded - that is why the top-apps chart only ever showed the first
 -- few packets of a long connection.
-local APPS = "/tmp/oaf-flow/apps.json"
+local APPS = "/tmp/oaf-lite/apps.json"
 local apps_cache, apps_at = nil, 0
 
 function M.app_traffic(mac)
@@ -895,9 +961,9 @@ function M.client_app_visits(mac)
 	local list = M.app_traffic(mac)
 	if type(list) ~= "table" then return {} end
 	local now = os.time()
-	local t = os.date("*t", now)
-	local midnight = os.time({ year = t.year, month = t.month, day = t.day,
-	                           hour = 0, min = 0, sec = 0 })
+	-- 必须用配置时区的午夜：apps.json 里的小时桶是采样器按 tz=8 落的，
+	-- 用系统时区（这台机器是 UTC）算午夜会让访问时间整体偏 8 小时。
+	local midnight = M.local_midnight(now)
 	local MIN_BYTES = 2048
 	local out = {}
 	for _, a in ipairs(list) do
@@ -955,6 +1021,49 @@ function M.accel()
 	local raw = f:read("*a") or ""
 	f:close()
 	return raw:match("option%s+flow_offloading%s+['\"]?1") ~= nil
+end
+
+-- ---------------------------------------------------------------- oaf-lite extras
+-- Protocol distribution for one client. proto.json is written by the C
+-- sampler and carries the six legend classes:
+--   TLS / HTTP / QUIC / FAILED / DNS / OTHER
+-- with the exact colours used by the chart.
+function M.proto_traffic(mac)
+	local raw = read_json("/tmp/oaf-lite/proto.json")
+	if not raw then return { order = {}, lan = {}, list = {} } end
+	local key = mac_key(mac)
+	local cl = raw.clients or {}
+	local list = cl[key:lower()] or cl[key] or {}
+	return {
+		order                = raw.order or {},
+		lan                  = raw.lan   or {},
+		updated              = raw.updated or 0,
+		list                 = list,
+		other_top            = raw.other_top or {},
+		hw_offload_unreliable = raw.hw_offload_unreliable or 0,
+	}
+end
+
+-- Sampler status for the page footer / diagnostics.
+function M.feature_info()
+	local s = M.snapshot()
+	if not s then return nil end
+	return {
+		version              = s.version or "",
+		backend              = s.backend or "",
+		backend_id           = s.backend_id or 0,
+		degraded             = s.degraded or 0,
+		hw_offload_unreliable = s.hw_offload_unreliable or 0,
+		feature_rules        = s.feature_rules or 0,
+		updated              = s.updated or 0,
+	}
+end
+
+-- Full client list straight from the sampler (no oafd / ubus involved).
+function M.users()
+	local raw = read_json("/tmp/oaf-lite/users.json")
+	if not raw then return nil end
+	return raw.users or {}
 end
 
 return M

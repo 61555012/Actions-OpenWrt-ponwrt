@@ -3,7 +3,7 @@
 --
 -- 为什么不用 LuCI 的 controller：一次 LuCI 请求固定要 ~65 ms——派发器要
 -- 解析菜单索引缓存、加载会话插件、再 require 一整套 luci.* 模块，而
--- /api/live_rates 本身只读 /tmp/oaf-flow/stats.json、输出几百字节。实测
+-- /api/live_rates 本身只读 /tmp/oaf-lite/stats.json、输出几百字节。实测
 -- 同一个数据走 LuCI 是 70 ms，走这里 8 ms，页面开着时每秒一次，差出来的
 -- 就是这一整块 CPU。
 --
@@ -53,7 +53,7 @@ if not sj:find('"username"', 1, true) then
 end
 
 -- 数据 -------------------------------------------------------------------
-local ok, tr = pcall(require, "luci.oaf_traffic")
+local ok, tr = pcall(require, "luci.oaf_lite")
 if not ok then out("200 OK", '{"list":[]}') end
 local ok2, idx = pcall(tr.index)
 if not ok2 or type(idx) ~= "table" then out("200 OK", '{"list":[]}') end
@@ -63,9 +63,14 @@ local want
 local raw = urlarg(body, "macs")
 if raw == "" then raw = urlarg(q, "macs") end
 if raw ~= "" then
+	-- 前端 OAFXHR.post 用 encodeURIComponent 编码整个值：冒号变 %3A，
+	-- 逗号变 %2C。这里必须先把 %2C 还原成分隔符，再按逗号切分，否则整串
+	-- 会被当成一个 MAC，匹配不到任何客户端，快通道永远返回空列表，
+	-- 列表页表现就是「数字不刷新」。裸逗号（老前端）同样兼容。
+	raw = raw:gsub("%%2[cC]", ",")
 	want = {}
 	for m in raw:gmatch("[^,]+") do
-		m = m:gsub("%%3[Aa]", ":"):gsub("%%3[aA]", ":"):upper()
+		m = m:gsub("%%3[aA]", ":"):upper()
 		want[m] = true
 	end
 end
@@ -88,8 +93,14 @@ for i, mac in ipairs(macs) do
 			(i > 1) and "," or "", mac, (c.ip6 or ""):gsub('[\\"]', ""),
 			c.rate_up or 0, c.rate_down or 0,
 			c.rate_up6 or 0, c.rate_down6 or 0,
-			c.today_up or 0, c.today_down or 0,
-			c.today_up6 or 0, c.today_down6 or 0,
+			-- stats.json 里这些字段叫 day_up / day_down / day_up6 / day_down6。
+			-- 这里原来读的是 today_up / today_down，字段名对不上，取到 nil
+			-- 后一律输出 0，于是列表页每秒把流量列刷成 0（看起来就像不刷新）。
+			-- 两套名字都认，旧快照也不会炸。
+			c.day_up or c.today_up or 0,
+			c.day_down or c.today_down or 0,
+			c.day_up6 or c.today_up6 or 0,
+			c.day_down6 or c.today_down6 or 0,
 			c.day_active or 0, c.flows or 0)
 	end
 end

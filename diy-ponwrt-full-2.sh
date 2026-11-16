@@ -6,7 +6,7 @@
 #   - 必须在 feeds install -a 之前，否则会留下指向旧目录的软链
 #
 # 做的事：
-#   0) 拉官方 OpenAppFilter：oaf.ko + appfilter + luci-app-oaf 全部编入
+#   0) 装入 luci-app-oaf-lite（用户列表；自包含 C 采样器，不再要 oaf.ko/appfilter/oafd）
 #   1) 打开内核每流统计 CONFIG_NET_AIROHA_FLOW_STATS
 #   2) PPE 条目 TCP FIN 老化 1s -> 30s
 #   3) 补 kmod-nf-conntrack-bridge 检查
@@ -15,6 +15,9 @@
 #   6) 检查关键包 + 删除「系统 → 插件」页
 #
 set -e
+
+# 脚本始终放在仓库根目录，源码树可能在其下 openwrt/，先固定仓库根
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 cd "$(dirname "$0")"
 if [ -f feeds.conf.default ] && [ -d scripts ]; then
@@ -26,29 +29,24 @@ else
   echo "❌ 找不到 openwrt 源码树 (feeds.conf.default)"; exit 1
 fi
 
-# 0) OAF：后端保留（oaf.ko + appfilter/oafd），官方 Lua 界面不编入
-#    界面换成 files/ 里的 oaf_status（用户列表 + 终端详情），所以
-#    luci-app-oaf 目录直接删掉——留着也不会被选中，但删干净更好排错。
-#    清掉旧的同名目录，避免与 feeds 里的软链冲突
-echo "==== [diy-part2] OAF: 拉最新官方源码（保留 oaf.ko + open-app-filter，去掉 luci-app-oaf）===="
+# 0) 用户列表：luci-app-oaf-lite（自包含 C 采样器 + LuCI 页面）
+#    不再拉 OpenAppFilter：没有 oaf.ko、没有 appfilter/oafd、没有 rule_manager，
+#    也不写防火墙规则。L7 标签靠抓每条流的前几个包（TLS SNI / HTTP Host /
+#    QUIC / DNS），字节数靠 conntrack 差分 + AN7581 PPE 每流统计回写。
+#    这里只把仓库自带的 package/luci-app-oaf-lite 放进源码树，由 make 编译。
+echo "==== [diy-part2] 用户列表: 装入 luci-app-oaf-lite（不再编 oaf.ko / appfilter / oafd）===="
+# 旧的内核套件与官方界面残留一律清掉，避免和本地包同名冲突
 find . -type d \( -name "OpenAppFilter" -o -name "luci-app-oaf" -o -name "open-app-filter" \) \
 	-exec rm -rf {} + 2>/dev/null || true
 rm -rf package/feeds/*/luci-app-oaf package/feeds/*/OpenAppFilter
-git clone --depth 1 https://github.com/destan19/OpenAppFilter package/OpenAppFilter
-OAFC=$(git -C package/OpenAppFilter rev-parse --short HEAD 2>/dev/null || echo '?')
-echo "    官方 OAF commit: ${OAFC}"
-rm -rf package/OpenAppFilter/luci-app-oaf
-OAF_MISS=0
-for d in oaf open-app-filter; do
-  if [ -f "package/OpenAppFilter/$d/Makefile" ]; then
-    echo "    ✅ package/OpenAppFilter/$d"
-  else
-    echo "    ❌ 缺少 package/OpenAppFilter/$d"; OAF_MISS=1
-  fi
-done
-if [ "$OAF_MISS" = "1" ]; then
-  echo "    ❌ OpenAppFilter 克隆不完整（网络问题？检查 github 连通性）"; exit 1
+PKG_SRC="$REPO_ROOT/package/luci-app-oaf-lite"
+if [ ! -f "$PKG_SRC/Makefile" ] || [ -z "$(ls -A "$PKG_SRC/src" 2>/dev/null)" ]; then
+  echo "    ❌ 缺少 package/luci-app-oaf-lite（Makefile 或 src/ 为空）: $PKG_SRC"; exit 1
 fi
+rm -rf package/luci-app-oaf-lite
+cp -a "$PKG_SRC" package/luci-app-oaf-lite
+echo "    ✅ package/luci-app-oaf-lite ($(ls package/luci-app-oaf-lite/src/*.c 2>/dev/null | wc -l) 个 .c 源文件)"
+grep -m1 '^PKG_VERSION' package/luci-app-oaf-lite/Makefile | sed 's/^/       /'
 
 # 1) 内核每流流量统计
 echo "==== [diy-part2] 打开 CONFIG_NET_AIROHA_FLOW_STATS ===="
@@ -160,6 +158,7 @@ if [ -d feeds/pon_userspace/luci-app-iptv ]; then
   echo "    ℹ️  feeds/pon_userspace/luci-app-iptv 存在，但不编入固件"
 fi
 chk package/luci-app-airoha-npu
+chk package/luci-app-oaf-lite
 if [ "$fail" = "1" ]; then echo "❌ 有包缺失，终止"; exit 1; fi
 echo "    ✅ 全部就位"
 

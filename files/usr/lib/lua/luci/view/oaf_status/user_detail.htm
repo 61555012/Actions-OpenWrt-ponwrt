@@ -3,6 +3,7 @@
 <script type="text/javascript" src="<%=resource%>/oaf_status/jquery-3.7.1.min.js?v=7.0"></script>
 <script type="text/javascript" src="<%=resource%>/oaf_status/oaf_icon.js?v=7.0"></script>
 <script type="text/javascript" src="<%=resource%>/oaf_status/echarts.min.js?v=5.0"></script>
+<script type="text/javascript" src="<%=resource%>/oaf_status/proto.js?v=1.0"></script>
 
 <script type="text/javascript">
 // 6.1 是 Argon 主题，明暗状态放在 <html data-argon-mode="dark|light">；
@@ -39,6 +40,55 @@
 })();
 </script>
 <script type="text/javascript">//<![CDATA[
+	// --- XHR 兼容层 ---------------------------------------------------------
+	// 新版 LuCI（26.x）的 luci.js 把 XHR 定义成**对象**（XHR.get = ...），
+	// 不是构造函数；而本页沿用旧式 new OAFXHR()。直接调用会抛
+	// "XHR is not a constructor"，整个初始化（取数、轮询、速率）就此中断，
+	// 页面上只剩服务端内联的快照，看起来就是“不刷新、应用列空白”。
+	// 这里补一个最小实现，并改名 OAFXHR 避免覆盖全局的同名对象。
+	var OAFXHR = (function () {
+		function send(method, url, body, cb) {
+			var x = new XMLHttpRequest();
+			x.open(method, url, true);
+			x.setRequestHeader('Accept', 'application/json');
+			if (body !== null) {
+				x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+			}
+			x.onreadystatechange = function () {
+				if (x.readyState !== 4) return;
+				var d = null;
+				try { d = x.responseText ? JSON.parse(x.responseText) : null; } catch (e) { d = null; }
+				if (typeof cb === 'function') cb(x, d);
+			};
+			x.send(body);
+			return x;
+		}
+		function Ctor() {}
+		Ctor.prototype.get = function (url, query, cb) {
+			var qs = [], u = url;
+			if (query) {
+				for (var k in query) {
+					if (query[k] === null || typeof query[k] === 'undefined') continue;
+					qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(query[k]));
+				}
+			}
+			if (qs.length) u += (u.indexOf('?') < 0 ? '?' : '&') + qs.join('&');
+			return send('GET', u, null, cb);
+		};
+		Ctor.prototype.post = function (url, data, cb) {
+			var body = [];
+			if (data) {
+				for (var k in data) {
+					if (data[k] === null || typeof data[k] === 'undefined') continue;
+					body.push(encodeURIComponent(k) + '=' + encodeURIComponent(data[k]));
+				}
+			}
+			return send('POST', url, body.join('&'), cb);
+		};
+		return Ctor;
+	})();
+
+
 	const FWX_ECHART_RENDERER = 'svg';
 	// 手机（<=768px）用另一套图表参数：饼图挪到中间、外标签关掉、横轴隔几个显示
 	const FWX_NARROW = (function () {
@@ -111,6 +161,10 @@
 		if (!mac) return;
 		
 		loadUserBasicInfo();
+		// 延到本轮脚本跑完再启动定时器：这脚本可能在解析途中就被调用
+		// （readyState 已过 loading），此时下面的 var 还没赋初值，
+		// 直接启动会被随后的 `= 0` 把定时器 id 冲掉。
+		window.setTimeout(startBasicAutoRefresh, 0);
 	
 		var activeTab = document.querySelector('.tab-body.active');
 		if (activeTab) {
@@ -129,13 +183,38 @@
 	
 	function loadUserBasicInfo() {
 		if (!mac) return;
-		new XHR().get("<%=url('admin/status/oaf_users/api/get_user_basic_info')%>/" + mac, null,
+		new OAFXHR().get("<%=url('admin/status/oaf_users/api/get_user_basic_info')%>/" + mac, null,
 			function (x, data) {
-				if (data && data.mac) {
-					render_user_basic_info(data);
-				}
+				basic_refresh_inflight = false;
+				try {
+					if (data && data.mac) render_user_basic_info(data);
+				} catch (e) {}
 			}
 		);
+	}
+
+	// 基本信息（实时速率、今日流量、在线时长）以前只在进页面时取一次，
+	// 之后永远是那一瞬间的快照 —— 详情页看起来「不刷新」就是这个原因。
+	// 这里跟上列表页的节奏：可见 2 秒一次，不可见降到 10 秒一次，但绝不停。
+	// （不用 visibilitychange 恢复：那个事件不可靠，一旦漏收就永久停摆。）
+	var basic_refresh_timer = 0;
+	var basic_refresh_inflight = false;
+	var basic_tick = 0;
+
+	function startBasicAutoRefresh() {
+		if (basic_refresh_timer || !mac) return;
+		basic_refresh_timer = window.setInterval(function () {
+			basic_tick++;
+			if (document.hidden && (basic_tick % 5) !== 0) return;
+			var tabBasic = document.getElementById('tab-user-info');
+			if (tabBasic && !tabBasic.classList.contains('active')) return;
+			if (basic_refresh_inflight) return;
+			basic_refresh_inflight = true;
+			// 请求没回来时别把这条通道永久卡死
+			window.setTimeout(function () { basic_refresh_inflight = false; }, 5000);
+			try { loadUserBasicInfo(); }
+			catch (e) { basic_refresh_inflight = false; }
+		}, 2000);
 	}
 	
 	// 与用户列表同一套规则：IP 格只显示 IPv4 租约。
@@ -152,8 +231,12 @@
 		document.getElementById('basic_info_ip').textContent = displayIPv4(user.ip);
 		// 详情页不显示 IPv6：设备通常同时持有多个临时地址（隐私地址会轮换），
 		// 那一格长期是一串看不懂的地址，对判断设备没有帮助。
-		current_nickname = (user.nickname || '').trim();
-		renderNicknameView(current_nickname);
+		// 正在编辑备注时不要回写：这条渲染路径现在每 2 秒被自动刷新调一次，
+		// 无脑覆盖 input.value 会把用户正打的字清掉。
+		if (!nickname_editing) {
+			current_nickname = (user.nickname || '').trim();
+			renderNicknameView(current_nickname);
+		}
 		document.getElementById('basic_info_hostname').textContent = user.hostname || '--';
 		
 		var todayOnlineTime = user.today_online_time || 0;
@@ -170,6 +253,10 @@
 		document.getElementById('basic_info_wifi_ifname').textContent = user.wifi_ifname || '--';
 		document.getElementById('basic_info_tx_rate').textContent = formatWirelessRate(user.tx_rate);
 		document.getElementById('basic_info_rx_rate').textContent = formatWirelessRate(user.rx_rate);
+		// 无线两项（频段/接口、收发速率）按设备自动识别：iwinfo 只对关联到
+		// AP 的站点给出这些值，有线设备的它们恒为 nil。以前不管有没有都画，
+		// 有线设备永远挂着两行 --，看不出信息还占版面。
+		setWirelessRowsVisible(isWirelessUser(user));
 		
 		var statusElement = document.getElementById('basic_info_status');
 		if (user.online == 1) {
@@ -389,7 +476,7 @@
 
 		nickname_submitting = true;
 		nickname_log('submit request', { mac: mac, nickname: nickname });
-		new XHR().post("<%=url('admin/status/oaf_users/api/set_nickname')%>",
+		new OAFXHR().post("<%=url('admin/status/oaf_users/api/set_nickname')%>",
 		{ mac: mac, nickname: nickname },
 		function(x, data) {
 			var ok = !!(x && x.status >= 200 && x.status < 300);
@@ -425,7 +512,7 @@
 		if (!isVisible) {
 			return;
 		}
-		new XHR().get("<%=url('admin/status/oaf_users/api/dev_visit_time')%>/" + mac, null,
+		new OAFXHR().get("<%=url('admin/status/oaf_users/api/dev_visit_time')%>/" + mac, null,
 			function (x, st) {
 				visit_time_data = st;
 				display_app_visit_view(visit_time_data);
@@ -487,7 +574,7 @@
 		if (!isVisible) {
 			return;
 		}
-		new XHR().get("<%=url('admin/status/oaf_users/api/get_hourly_stats')%>/" + mac, null,
+		new OAFXHR().get("<%=url('admin/status/oaf_users/api/get_hourly_stats')%>/" + mac, null,
 			function (x, st) {
 				if (st && st.hourly_stats) {
 					hourlyStatsData = st.hourly_stats;
@@ -705,7 +792,7 @@
 		if (!mac) return;
 		var url = "<%=url('admin/status/oaf_users/api/dev_visit_list')%>/" + mac + "?page=" + page + "&page_size=" + visit_page_size;
 		var cb = arguments.length > 1 ? arguments[1] : null;
-		new XHR().get(url, null,
+		new OAFXHR().get(url, null,
 			function (x, st) {
 				visit_list_data = st;
 				visit_total_num = st.total_num || 0;
@@ -1340,7 +1427,7 @@
 	// 和上方「应用时长」图是两套口径，不能混算。
 	function loadAppTraffic() {
 		if (!mac) return;
-		new XHR().get("<%=url('admin/status/oaf_users/api/app_traffic')%>?mac=" + encodeURIComponent(mac), null,
+		new OAFXHR().get("<%=url('admin/status/oaf_users/api/app_traffic')%>?mac=" + encodeURIComponent(mac), null,
 			function (x, data) {
 				renderAppTraffic((data && data.apps) || []);
 			}
@@ -1407,6 +1494,34 @@
 		}
 	}
 
+	// 这台设备是不是无线接入的：iwinfo 的 station dump 里有它，后端才会
+	// 填 band / wifi_ifname / tx_rate / rx_rate / rssi 这几个字段。
+	// 有线设备这几个值恒为 nil —— 只要任意一个有效就算无线。
+	function isWirelessUser(user) {
+		if (!user) return false;
+		if (String(user.wifi_ifname || '').trim()) return true;
+		if (String(user.band || '').trim()) return true;
+		var tx = parseInt(user.tx_rate, 10);
+		if (!isNaN(tx) && tx > 0) return true;
+		var rx = parseInt(user.rx_rate, 10);
+		if (!isNaN(rx) && rx > 0) return true;
+		return false;
+	}
+
+	// 有线设备把「频段 / 无线接口」「无线收发速率」两行整行收掉，
+	// 不给它留两排 --
+	function setWirelessRowsVisible(show) {
+		['basic_row_wifi_info', 'basic_row_wifi_rate'].forEach(function (id) {
+			var el = document.getElementById(id);
+			if (!el) return;
+			// 用属性而不是内联 display:none —— 表格行的 display 被主题用
+			// `table-row !important` 锁死了，内联样式压不过它。
+			if (show) el.removeAttribute('data-row-off');
+			else el.setAttribute('data-row-off', '1');
+			if (el.style && el.style.display) el.style.display = '';
+		});
+	}
+
 	function formatWirelessRate(rate) {
 		var rateNum = parseInt(rate, 10);
 		if (isNaN(rateNum) || rateNum <= 0) {
@@ -1464,7 +1579,7 @@
 
 		var url = "<%=url('admin/status/oaf_users/api/history_traffic')%>?mac=" + encodeURIComponent(mac) + "&mode=30d";
 
-		new XHR().get(url, null, function(x, data) {
+		new OAFXHR().get(url, null, function(x, data) {
 			if (!data || data.code !== 0) {
 				historySetPlaceholder('--');
 				var box = document.getElementById('history_detail');
@@ -1638,7 +1753,11 @@
 				}, 100);
 			}
 		}
-		
+		if (tabId === 'tab-protocol') {
+			stopVisitAutoRefresh();
+			if (window.loadProtoTraffic) loadProtoTraffic();
+		}
+
 	}
 
 	// 明暗切换时重画当前标签页的图：ECharts 的颜色是渲染时取的，
@@ -1678,8 +1797,9 @@
 				<li class="tab-item" onclick="showTabContent('tab-traffic-statistics', this)"><%:Today Traffic%></li>
 				<li class="tab-item" onclick="showTabContent('tab-history-traffic', this)">历史流量</li>
 				<li class="tab-item" onclick="showTabContent('tab-app-ranking', this)"><%:Today Top Apps%></li>
-				<li class="tab-item" onclick="showTabContent('tab-visit-records', this)"><%:Visit Records%></li>
-			</ul>
+			<li class="tab-item" onclick="showTabContent('tab-visit-records', this)"><%:Visit Records%></li>
+			<li class="tab-item" onclick="showTabContent('tab-protocol', this)">协议分布</li>
+		</ul>
 
 			<div id="tab-user-info" class="tab-body active">
 				<div>
@@ -1719,13 +1839,13 @@
 							<td class="td" style="font-weight: bold;"><%:Today Downstream Traffic%></td>
 							<td class="td" id="basic_info_down_bytes">--</td>
 						</tr>
-						<tr class="tr">
+						<tr class="tr" id="basic_row_wifi_info">
 							<td class="td" style="font-weight: bold;"><%:Band%></td>
 							<td class="td" id="basic_info_band">--</td>
 							<td class="td" style="font-weight: bold;"><%:Wireless Interface%></td>
 							<td class="td" id="basic_info_wifi_ifname">--</td>
 						</tr>
-						<tr class="tr">
+						<tr class="tr" id="basic_row_wifi_rate">
 							<td class="td" style="font-weight: bold;"><%:Wireless Tx Rate%></td>
 							<td class="td" id="basic_info_tx_rate">--</td>
 							<td class="td" style="font-weight: bold;"><%:Wireless Rx Rate%></td>
@@ -1831,10 +1951,27 @@
 						</tr>
 					</table>
 				</div>
-				<div id="visit_pagination" style="margin-top: 20px;"></div>
+			<div id="visit_pagination" style="margin-top: 20px;"></div>
+		</div>
+
+		<!-- oaf-lite: L7 协议分布（首包采样打标签，硬件加速后的字节仍按标签累计） -->
+		<div id="tab-protocol" class="tab-body">
+			<div class="visit-hint" style="font-size: 12px; opacity: .65; margin: 0 0 10px 2px;">
+				按协议统计该客户端今日流量。TLS / HTTP / QUIC / FAILED / DNS / 其他 由首包采样识别（ClientHello SNI、HTTP Host、DNS 报文、QUIC 长头、握手失败）。
+				明文特征库只用于应用名匹配，不向内核下发规则。闭源 HNAT（如 XG040 的 hw_nat）卸载后不回写 conntrack 字节，此时图中仅含首包可采样与未卸载流量，为估算值。
+			</div>
+			<div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+				<div id="proto_chart" style="flex:1 1 380px;min-width:320px;height:340px;"></div>
+				<div style="flex:0 0 240px;min-width:200px;">
+					<div style="font-weight:bold;margin-bottom:10px;">协议图例</div>
+					<div id="proto_legend"></div>
+					<div id="proto_sampler_info" style="margin-top:14px;font-size:12px;opacity:.7;line-height:1.6;"></div>
+					<div id="proto_other_note" style="margin-top:14px;font-size:12px;opacity:.7;line-height:1.6;"></div>
+				</div>
 			</div>
 		</div>
 	</div>
+</div>
 </div>
 
 <div id="nickname_toast" class="nickname-toast"></div>
@@ -2492,6 +2629,14 @@
 	flex: 0 0 9px;
 	border-radius: 2px;
 	display: inline-block;
+}
+
+/* 无线两行（频段/接口、收发速率）对有線设备是空的，整行收掉。
+   必须用属性选择器 + !important：上面 @media(min-width:769px) 里
+   `.user-basic-info-table tr.tr{display:table-row !important}` 会把内联
+   display:none 压回去，属性选择器多一级特异性才能盖住它。 */
+.user-basic-info-table tr.tr[data-row-off="1"] {
+	display: none !important;
 }
 </style>
 

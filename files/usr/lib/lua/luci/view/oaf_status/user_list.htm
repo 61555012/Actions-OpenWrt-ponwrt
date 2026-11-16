@@ -47,6 +47,55 @@ function oafAppIconSrc(id) {
 })();
 </script>
 	<script type="text/javascript">//<![CDATA[
+	// --- XHR 兼容层 ---------------------------------------------------------
+	// 新版 LuCI（26.x）的 luci.js 把 XHR 定义成**对象**（XHR.get = ...），
+	// 不是构造函数；而本页沿用旧式 new OAFXHR()。直接调用会抛
+	// "XHR is not a constructor"，整个初始化（取数、轮询、速率）就此中断，
+	// 页面上只剩服务端内联的快照，看起来就是“不刷新、应用列空白”。
+	// 这里补一个最小实现，并改名 OAFXHR 避免覆盖全局的同名对象。
+	var OAFXHR = (function () {
+		function send(method, url, body, cb) {
+			var x = new XMLHttpRequest();
+			x.open(method, url, true);
+			x.setRequestHeader('Accept', 'application/json');
+			if (body !== null) {
+				x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+			}
+			x.onreadystatechange = function () {
+				if (x.readyState !== 4) return;
+				var d = null;
+				try { d = x.responseText ? JSON.parse(x.responseText) : null; } catch (e) { d = null; }
+				if (typeof cb === 'function') cb(x, d);
+			};
+			x.send(body);
+			return x;
+		}
+		function Ctor() {}
+		Ctor.prototype.get = function (url, query, cb) {
+			var qs = [], u = url;
+			if (query) {
+				for (var k in query) {
+					if (query[k] === null || typeof query[k] === 'undefined') continue;
+					qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(query[k]));
+				}
+			}
+			if (qs.length) u += (u.indexOf('?') < 0 ? '?' : '&') + qs.join('&');
+			return send('GET', u, null, cb);
+		};
+		Ctor.prototype.post = function (url, data, cb) {
+			var body = [];
+			if (data) {
+				for (var k in data) {
+					if (data[k] === null || typeof data[k] === 'undefined') continue;
+					body.push(encodeURIComponent(k) + '=' + encodeURIComponent(data[k]));
+				}
+			}
+			return send('POST', url, body.join('&'), cb);
+		};
+		return Ctor;
+	})();
+
+
 		const FWX_ECHART_RENDERER = 'svg';
 		let visit_time_data = []; // Use mock data for chart display
 		let user_list_data = {
@@ -61,7 +110,10 @@ function oafAppIconSrc(id) {
 		let total_page = 1;
 		let app_class_name_map = {};
 		let app_class_map_loaded = false;
-		let user_session_enable = false;
+		// 信号列不再由后端开关直接决定：机器有无线（sys_wireless_support）
+		// 只代表「这列有可能出现」，真正上不上屏还要看这一页里有没有无线
+		// 客户端——全是有线设备时整列都是 --，白占 6% 宽度。
+		let sys_wireless_support = false;
 		let user_rssi_enable = false;
 		let view_mode = 'list';
 
@@ -151,20 +203,19 @@ function oafAppIconSrc(id) {
 		}
 
 		function applyCapabilityColumnVisibility() {
-			var sessionHeaderEl = document.getElementById('session_count_header');
 			var rssiHeaderEl = document.getElementById('rssi_header');
 			var loadingCellEl = document.getElementById('user_status_loading_cell');
-			setColumnOff(sessionHeaderEl, !user_session_enable);
 			setColumnOff(rssiHeaderEl, !user_rssi_enable);
 			if (loadingCellEl) {
-				loadingCellEl.colSpan = 10 + (user_session_enable ? 1 : 0) + (user_rssi_enable ? 1 : 0);
+				// 终端 / IP / 连接数 / 上行 / 下行 / 流量 / 时长 / 应用 / URL / 状态 / 操作
+				loadingCellEl.colSpan = 11 + (user_rssi_enable ? 1 : 0);
 			}
 		}
 
 		function loadSystemBaseInfo(callback) {
-			new XHR().get("<%=url('admin/status/oaf_users/api/get_system_base_info')%>", {}, function(x, data) {
-				user_session_enable = !!(data && parseInt(data.user_session_enable, 10) === 1);
-				user_rssi_enable = !!(data && Object.prototype.hasOwnProperty.call(data, 'wireless_support'));
+			new OAFXHR().get("<%=url('admin/status/oaf_users/api/get_system_base_info')%>", {}, function(x, data) {
+				sys_wireless_support = !!(data && Object.prototype.hasOwnProperty.call(data, 'wireless_support'));
+				user_rssi_enable = sys_wireless_support;
 				applyCapabilityColumnVisibility();
 				if (callback) callback();
 			});
@@ -175,7 +226,7 @@ function oafAppIconSrc(id) {
 				if (callback) callback();
 				return;
 			}
-			new XHR().get("<%=url('admin/status/oaf_users/api/get_class_list')%>", {}, function(x, data) {
+			new OAFXHR().get("<%=url('admin/status/oaf_users/api/get_class_list')%>", {}, function(x, data) {
 				var classMap = {};
 				var classPayload = data || {};
 				if (!Array.isArray(classPayload.class_list) && classPayload.data && Array.isArray(classPayload.data.class_list)) {
@@ -296,6 +347,29 @@ function oafAppIconSrc(id) {
 			try { document.addEventListener(ev, noteUserInteraction, { passive: true }); } catch (e) {}
 		});
 
+		// 一台设备是不是无线接入的：只有在网的行才有信号值，有线的
+		// RSSI 是 nil 或 0（iwinfo 只认 station dump 里的关联客户端）。
+		function isWirelessUser(u) {
+			if (!u) return false;
+			if (parseInt(u.online, 10) !== 1) return false;
+			var n = parseInt(u.rssi, 10);
+			return !isNaN(n) && n !== 0;
+		}
+
+		// 「无线」改成自动识别：机器有无线网卡只是前提，还得本页真的有无线
+		// 客户端才画信号列。以前只要机器带 wifi 就固定占一列，全是有线设备
+		// 时整列清一色 --，白占 6% 宽度，还挤得 URL 列换行。
+		function refresh_rssi_column(list) {
+			var has = false;
+			for (var i = 0; i < list.length; i++) {
+				if (isWirelessUser(list[i])) { has = true; break; }
+			}
+			var want = sys_wireless_support && has;
+			if (want === user_rssi_enable) return;
+			user_rssi_enable = want;
+			applyCapabilityColumnVisibility();
+		}
+
 		// 只有「结构」变化才值得重建整张表。速率、流量、时长每 3 秒都在变，
 		// 把它们算进签名会让每一轮都全量重绘，CPU 和内存全耗在造 DOM 上。
 		//
@@ -307,7 +381,7 @@ function oafAppIconSrc(id) {
 		function listStructureSignature(d) {
 			var list = d.list || [];
 			var parts = [d.total_num, d.total_page, d.page, view_mode,
-				user_session_enable ? 1 : 0, user_rssi_enable ? 1 : 0];
+				user_rssi_enable ? 1 : 0];
 			for (var i = 0; i < list.length; i++) {
 				var u = list[i];
 				var hasV6 = (u.ip6 || u.up_rate6 > 0 || u.down_rate6 > 0 ||
@@ -358,12 +432,17 @@ function oafAppIconSrc(id) {
 
 		// 慢通道：3s（手机 5s）一次，负责状态、应用、时长这些字段。
 		function getAllUsersData(page, force, done) {
-			new XHR().get("<%=url('admin/status/oaf_users/api/get_all_users')%>", {flag: 3, page: page, page_size: page_size},
+			new OAFXHR().get("<%=url('admin/status/oaf_users/api/get_all_users')%>", {flag: 3, page: page, page_size: page_size},
 				function (x, data) {
+					notePollOk();
 					if (!data || !data.data) {
 						if (typeof done === 'function') done();
 						return;
 					}
+					// 先按这一页的设备定「信号列要不要上屏」，再算结构签名：
+					// 反过来的话，无线设备刚上线的那一轮签名用的还是旧值，
+					// 下一轮必然对不上，白重绘一次整表。
+					refresh_rssi_column(data.data.list || []);
 					var signature = listStructureSignature(data.data);
 					// 结构没变就不重建 DOM，只把信号/会话/时长这些纯文本就地刷一遍；
 					// 滚动位置自然不会抖，也省掉每 3 秒重造几百个节点。
@@ -553,7 +632,7 @@ function oafAppIconSrc(id) {
 		}
 
 		function fetchLiveRates() {
-			if (liveInFlight || document.hidden || !listDomReady) return;
+			if (liveInFlight || !listDomReady) return;
 			liveInFlight = true;
 			// 请求没回来（断网 / 路由器忙）时别把快通道永久卡死
 			setTimeout(function () { liveInFlight = false; }, 4000);
@@ -572,11 +651,12 @@ function oafAppIconSrc(id) {
 				}
 				liveMap = m;
 				livePeak = peak;
+				notePollOk();
 				applyLiveValues();
 				return true;
 			}
 			function viaLuCI() {
-				new XHR().get(LIVE_API_URL, macs ? { macs: macs } : null,
+				new OAFXHR().get(LIVE_API_URL, macs ? { macs: macs } : null,
 					function (x, d) { apply(d); liveInFlight = false; });
 			}
 			// 优先走精简 CGI：同样的数据，省掉 LuCI 每请求 ~65ms 的启动。
@@ -584,7 +664,7 @@ function oafAppIconSrc(id) {
 			// 传 Cookie 和自定义头）。403/500/旧固件没有这个文件时自动回退
 			// 到 LuCI 接口，并把 liveLean 关掉，之后不再重试。
 			if (liveLean && OAF_SID) {
-				new XHR().post(LIVE_LEAN_URL, { sid: OAF_SID, macs: macs || '' },
+				new OAFXHR().post(LIVE_LEAN_URL, { sid: OAF_SID, macs: macs || '' },
 					function (x, data) {
 						if (apply(data)) return;
 						liveLean = false;
@@ -610,9 +690,66 @@ function oafAppIconSrc(id) {
 			}
 		}
 
+		// ---------------------------------------------------------------- 自愈
+		// 两条通道都是「回调里再排下一次」的链式写法：中间任何一行抛异常
+		// （某个字段结构变了、某个 DOM 节点没找到、浏览器扩展注入的脚本
+		// 改了 window 上的东西……），链条就静默断掉。页面表现极具迷惑性：
+		// 首屏数字是对的，之后永远不动，看起来像「后端不刷新」。
+		//
+		// 这里做三件事：
+		//   1. 每次取数包 try/catch，无论成败都重新排队；
+		//   2. window.onerror 兜底，出错时顺手把链条拉起来；
+		//   3. 1 秒心跳：超过 6 秒两条通道都没有一次成功，就地重启轮询。
+		var lastPollOk = Date.now();
+		var pollCount = 0;
+		var diagErr = '';
+
+		window.onerror = function (msg, src, line, col) {
+			diagErr = String(msg) + ' @' + line + ':' + col;
+			try {
+				if (!document.hidden) startPolling();
+			} catch (e) {}
+			return false;
+		};
+
+		function notePollOk() {
+			lastPollOk = Date.now();
+			pollCount++;
+		}
+
+		// 只有 location.search 带 debug=1 才挂角标，平时不留痕迹
+		function setupDiag() {
+			if (String(location.search || '').indexOf('debug=1') < 0) return;
+			var d = document.createElement('div');
+			d.id = 'oaf_diag';
+			d.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:99999;' +
+				'background:rgba(17,24,39,.92);color:#4ade80;font:12px/1.5 monospace;' +
+				'padding:8px 10px;border-radius:8px;opacity:.92;max-width:70vw;white-space:pre-wrap';
+			document.body.appendChild(d);
+			setInterval(function () {
+				d.textContent = 'hidden=' + document.hidden +
+					'  state=' + (document.visibilityState || '?') +
+					'  polls=' + pollCount +
+					'  idle=' + Math.round((Date.now() - lastPollOk) / 1000) + 's' +
+					'  lean=' + liveLean +
+					'\n' + (diagErr || 'no js error');
+			}, 500);
+		}
+
 		function scheduleSlow() {
 			clearTimeout(slowTimer);
-			if (document.hidden) return;
+			// 页面不可见时不再「彻底停」，改成低频保活。
+			// 以前是直接 return，全靠 visibilitychange 把链条接回来；可这个
+			// 事件并不可靠——窗口被别的窗口完全遮住、浏览器在另一个虚拟
+			// 桌面、某些扩展插了一层，都会让 visibilityState 一直是 hidden
+			// 或让事件丢失，表现就是「打开页面后数字永远不动」。
+			if (document.hidden) {
+				slowTimer = setTimeout(function () {
+					try { getAllUsersData(cur_page); } catch (e) {}
+					scheduleSlow();
+				}, 30000);
+				return;
+			}
 			// 慢通道只负责状态/应用/时长这类分钟级字段，速率和今日流量走快通道，
 			// 不依赖它。一次 get_all_users 在 6.1 上实测 150~220 ms（大头是 LuCI
 			// 每请求的进程启动），按 5s 跑等于常驻 3%~4% 一个核。
@@ -622,8 +759,8 @@ function oafAppIconSrc(id) {
 			var hot = Date.now() < slowFastUntil;
 			var delay = hot ? (narrow ? 8000 : 5000) : (narrow ? 20000 : 15000);
 			slowTimer = setTimeout(function () {
-				if (document.hidden) return;
-				getAllUsersData(cur_page);
+				try { getAllUsersData(cur_page); }
+				catch (e) { diagErr = 'slow: ' + (e && e.message ? e.message : e); }
 				scheduleSlow();
 			}, delay);
 		}
@@ -654,18 +791,33 @@ function oafAppIconSrc(id) {
 
 		function scheduleLive() {
 			clearTimeout(liveTimer);
-			if (document.hidden) return;
+			// 同 scheduleSlow：不可见时降速到 5 秒，不再整条停掉。
+			// 一秒一次只读 /tmp 里那几百字节，可见时才有意义；但完全停掉
+			// 一旦恢复事件没来，用户回来看到的就是几分钟前的数字。
+			var hidden = document.hidden;
 			liveTimer = setTimeout(function () {
-				if (document.hidden) return;
-				fetchLiveRates();
+				try { fetchLiveRates(); }
+				catch (e) { diagErr = 'live: ' + (e && e.message ? e.message : e); }
 				scheduleLive();
-			}, liveDelay());
+			}, hidden ? 5000 : liveDelay());
 		}
 
 		function startPolling() {
+			notePollOk();
 			scheduleSlow();
 			scheduleLive();
 		}
+
+		// 心跳：链条断了（异常、扩展干扰、定时器被别的脚本清掉）时自动重启。
+		// 6 秒是快通道 1~2 秒、慢通道 5~15 秒的折中：正常情况永远不会触发。
+		var heartbeatId = setInterval(function () {
+			if (Date.now() - lastPollOk < 6000) return;
+			try {
+				fetchLiveRates();
+				getAllUsersData(cur_page);
+			} catch (e) {}
+			startPolling();
+		}, 1000);
 
 		function onVisibilityChange() {
 			if (document.hidden) {
@@ -697,11 +849,28 @@ function oafAppIconSrc(id) {
 				}
 			});
 			loadSystemBaseInfo(function() {
-				getAllUsersData(cur_page, true, function () {
-					fetchLiveRates();
+				try {
+					getAllUsersData(cur_page, true, function () {
+						fetchLiveRates();
+						startPolling();
+					});
+				} catch (e) {
+					diagErr = 'boot: ' + (e && e.message ? e.message : e);
 					startPolling();
-				});
+				}
 			});
+			setupDiag();
+			// 兜底：system_base_info 挂着不返回（后端卡住、接口异常）时，
+			// 不能让整页停在“加载中”。3 秒还没出表就自己拉一次。
+			setTimeout(function () {
+				if (listDomReady) return;
+				try {
+					getAllUsersData(cur_page, true, function () {
+						fetchLiveRates();
+						startPolling();
+					});
+				} catch (e) {}
+			}, 3000);
 		});
 
 		function showSuccessMessage(message = '<%:Operation succeeded%>') {
@@ -1324,14 +1493,6 @@ function oafAppIconSrc(id) {
 					}
 					downRateHtml += '</div>';
 					$tr.append('<td class="td user-col-down-rate">' + downRateHtml + '</td>');
-					if (user_session_enable) {
-						var sessionDisplay = '--';
-						if (parseInt(user_list[i].online, 10) === 1) {
-							var sessionNum = parseInt(user_list[i].session, 10);
-							sessionDisplay = isNaN(sessionNum) ? '0' : String(sessionNum);
-						}
-						$tr.append('<td class="td user-col-sessions" data-live="sessions">' + sessionDisplay + '</td>');
-					}
 					var todayUpBytes = user_list[i].today_up_bytes || 0;
 					var todayDownBytes = user_list[i].today_down_bytes || 0;
 					var totalTraffic = todayUpBytes + todayDownBytes;
@@ -1402,14 +1563,10 @@ function oafAppIconSrc(id) {
 					}
 					var ipText = displayIPv4(user_list[i].ip);
 					var currentUrlText = current_url || '--';
-					var sessionInfo = '';
-					if (user_session_enable) {
-						var sessionNumCard = parseInt(user_list[i].session, 10);
-						var sessionDisplayCard = parseInt(user_list[i].online, 10) === 1 ? (isNaN(sessionNumCard) ? '0' : String(sessionNumCard)) : '--';
-						sessionInfo = '<div class="user-card-line"><span class="user-card-label"><%:Session Count%></span><span class="user-card-value" data-live="sessions">' + sessionDisplayCard + '</span></div>';
-					}
 					var rssiInfo = '';
-					if (user_rssi_enable) {
+					// 卡片是逐台排的，不受列对齐限制：有线设备这一行直接不画，
+					// 不会像表格那样留下一个空的 -- 占位。
+					if (isWirelessUser(user_list[i])) {
 						var rssiToneCls = rssiTone(user_list[i].rssi);
 						rssiInfo = '<div class="user-card-line"><span class="user-card-label"><%:Signal%></span>'
 							+ '<span class="user-card-value rssi-val' + (rssiToneCls ? ' ' + rssiToneCls : '') + '" data-live="rssi">'
@@ -1442,7 +1599,6 @@ function oafAppIconSrc(id) {
 								<div class="user-card-line"><span class="user-card-label" title="<%:Today Internet Duration%>"><%:Internet Duration%></span><span class="user-card-value" data-live="nettime">${todayActiveTimeStr}</span></div>
 								<div class="user-card-line"><span class="user-card-label" title="连接数：IPv4 + IPv6 的合计数">连接数</span><span class="user-card-value" data-live="flows">${cardFlowsText}</span></div>
 								<div class="user-card-line"><span class="user-card-label"><%:Rate%></span><span class="user-card-value user-card-stack">${cardRateHtml}</span></div>
-								${sessionInfo}
 								${rssiInfo}
 								<div class="user-card-line user-card-apps"><span class="user-card-label"><%:Common App%></span><span class="user-card-value user-card-apps-icons" data-live="apps"></span></div>
 								<div class="user-card-line"><span class="user-card-label"><%:Visiting URL%></span><span class="user-card-value user-card-url" data-live="url" title="${escapeHtml(currentUrlText)}">${escapeHtml(currentUrlText)}</span></div>
@@ -1622,7 +1778,7 @@ function oafAppIconSrc(id) {
 			var $modal = $('#detailsModal');
 			$modal.css('display', 'flex');
 
-			new XHR().get("<%=url('admin/status/oaf_users/api/dev_visit_time')%>/" + mac, null,
+			new OAFXHR().get("<%=url('admin/status/oaf_users/api/dev_visit_time')%>/" + mac, null,
 				function (x, st) {
 					visit_time_data = st;
 					console.log("visit_time_data = " + visit_time_data);
@@ -1630,7 +1786,7 @@ function oafAppIconSrc(id) {
 				}
 			);
 
-			new XHR().get("<%=url('admin/status/oaf_users/api/dev_visit_list')%>/" + mac, null,
+			new OAFXHR().get("<%=url('admin/status/oaf_users/api/dev_visit_list')%>/" + mac, null,
 				function (x, st) {
 					visit_list_data = st;
 					console.log("visit_list_data = " + visit_list_data);
@@ -1661,7 +1817,7 @@ function oafAppIconSrc(id) {
 				return;
 			}
 
-			new XHR().post("<%=url('admin/status/oaf_users/api/set_nickname')%>", 
+			new OAFXHR().post("<%=url('admin/status/oaf_users/api/set_nickname')%>", 
 			{ mac: mac, nickname: nickname },
 			function(x, data) {
 				console.log('Nickname updated successfully');
@@ -1888,10 +2044,7 @@ function oafAppIconSrc(id) {
 				<th class="th user-col-down-rate">
 					<%:Down Rate%>
 				</th>
-				<th class="th user-col-sessions" id="session_count_header" data-col-off="1">
-					<%:Sessions%>
-				</th>
-					<th class="th user-col-traffic" title="<%:Today Traffic%>">
+				<th class="th user-col-traffic" title="<%:Today Traffic%>">
 						<%:Net Traffic%>
 					</th>
 					<th class="th user-col-net-time" title="<%:Today Internet Duration%>">
@@ -1914,7 +2067,7 @@ function oafAppIconSrc(id) {
 				</th>
 			</tr>
 				<tr class="tr">
-					<td class="td" id="user_status_loading_cell" colspan="10"><em><br />
+					<td class="td" id="user_status_loading_cell" colspan="11"><em><br />
 							<%:Collecting data...%>
 						</em></td>
 				</tr>
@@ -2223,7 +2376,6 @@ function oafAppIconSrc(id) {
 	#user_status_table .user-col-down-rate { min-width: 90px; width: 7%; }
 	#user_status_table .user-col-flows { min-width: 72px; width: 5%; text-align: center !important; }
 	#user_status_table .user-col-signal { min-width: 88px; width: 6%; }
-	#user_status_table .user-col-sessions { min-width: 88px; width: 6%; }
 	#user_status_table .user-col-traffic { min-width: 100px; width: 7%; }
 	#user_status_table .user-col-net-time { min-width: 100px; width: 7%; }
 	/* 流量与时长两列原本只隔 ~40px，比其他列挤，这里补点呼吸空间 */
@@ -3112,12 +3264,14 @@ function oafAppIconSrc(id) {
 	#user_status_table .user-col-flows { width: 6% !important; min-width: 0 !important; }
 	#user_status_table .user-col-up-rate { width: 7% !important; min-width: 0 !important; }
 	#user_status_table .user-col-down-rate { width: 7% !important; min-width: 0 !important; }
-	#user_status_table .user-col-sessions { width: 6% !important; min-width: 0 !important; }
 	#user_status_table .user-col-traffic { width: 8% !important; min-width: 0 !important; }
 	#user_status_table .user-col-net-time { width: 7% !important; min-width: 0 !important; }
 	#user_status_table .user-col-signal { width: 7% !important; min-width: 0 !important; }
 	#user_status_table .user-col-apps { width: 11% !important; min-width: 0 !important; }
-	#user_status_table .user-col-url { width: 9.5% !important; min-width: 0 !important; }
+	/* URL 列不写死百分比：信号列是否上屏随设备类型变（无线客户端才有），
+	   固定布局下总宽度会因此差 7%。让这一列吃剩余宽度，两种情形都不会
+	   溢出，也不会把「状态 / 操作」挤到横向滚动区外面。 */
+	#user_status_table .user-col-url { width: auto !important; min-width: 0 !important; }
 	#user_status_table .user-col-status { width: 6% !important; min-width: 0 !important; }
 	#user_status_table .user-col-actions { width: 6% !important; min-width: 0 !important; }
 	/* 固定布局下列宽由百分比定死，内容超长时省略号收尾（否则会压到邻列上） */

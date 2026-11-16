@@ -1,0 +1,8 @@
+#!/bin/sh
+# 首启把采样器挂上（procd），并让 LuCI 立刻出现新菜单项。
+# package postinst 里也 enable 过一次，这里兜底：直接刷镜像（不经 opkg）时
+# postinst 不一定执行，缺了这行开机就没有采集进程。
+/etc/init.d/oaf-lite enable
+/etc/init.d/oaf-lite start
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null
+exit 0
