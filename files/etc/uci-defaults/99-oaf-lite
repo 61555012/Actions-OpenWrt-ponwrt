@@ -1,5 +1,16 @@
 #!/bin/sh
 # LuCI caches its dispatcher/controller index; drop it so the new
 # Status > User List menu entry shows up without a reboot.
+# Ensure the zh-cn language file is installed as a real .lmo. The source tree
+# only ships a base64 copy (usr/share/oaf_status/i18n-base64/*.b64) because
+# binary .lmo does not survive some transport paths; a plain tar deploy skips
+# the OpenWrt po2lmo step, so decode it here if missing.
+LMO=/usr/lib/lua/luci/i18n/oaf_status.zh-cn.lmo
+B64=/usr/share/oaf_status/i18n-base64/oaf_status.zh-cn.lmo.b64
+if [ ! -s "$LMO" ] && [ -s "$B64" ]; then
+	mkdir -p "$(dirname "$LMO")"
+	base64 -d "$B64" > "$LMO" 2>/dev/null && chmod 644 "$LMO"
+fi
+
 rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null
 exit 0
